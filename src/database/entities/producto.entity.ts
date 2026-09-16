@@ -60,20 +60,21 @@ export class Producto {
 
   @ManyToOne(
     () => CategoriaProducto,
-    (categoriaProducto) => categoriaProducto.productos
+    (categoriaProducto) => categoriaProducto.productos,
+    { nullable: true }
   )
   @JoinColumn([{ name: "CATEGORIA_ID", referencedColumnName: "categoriaId" }])
-  categoria: CategoriaProducto;
+  categoria: CategoriaProducto | null;
 
-  @ManyToOne(() => Laboratorio, (laboratorio) => laboratorio.productos)
+  @ManyToOne(() => Laboratorio, (laboratorio) => laboratorio.productos, { nullable: true })
   @JoinColumn([
     { name: "LABORATORIO_ID", referencedColumnName: "laboratorioId" },
   ])
-  laboratorio: Laboratorio;
+  laboratorio: Laboratorio | null;
 
-  @ManyToOne(() => UnidadMedida, (unidadMedida) => unidadMedida.productos)
+  @ManyToOne(() => UnidadMedida, (unidadMedida) => unidadMedida.productos, { nullable: true })
   @JoinColumn([
     { name: "UNIDAD_MEDIDA_ID", referencedColumnName: "unidadMedidaId" },
   ])
-  unidadMedida: UnidadMedida;
+  unidadMedida: UnidadMedida | null;
 }
