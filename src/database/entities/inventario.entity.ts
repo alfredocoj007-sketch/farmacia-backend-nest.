@@ -15,7 +15,7 @@ import { MovimientoInventario } from "./movimiento-inventario.entity";
 @Index("UQ_INVENTARIO", ["sucursalId", "loteId"], { unique: true })
 @Entity("INVENTARIO")
 export class Inventario {
-  @Column("number", { name: "SUCURSAL_ID", unique: true })
+  @Column("number", { name: "SUCURSAL_ID" })
   sucursalId: number;
 
   @Column("number", {
@@ -34,7 +34,7 @@ export class Inventario {
   })
   stockMaximo: number | null;
 
-  @Column("number", { name: "LOTE_ID", unique: true })
+  @Column("number", { name: "LOTE_ID" })
   loteId: number;
 
   @PrimaryGeneratedColumn({ type: "number", name: "INVENTARIO_ID" })

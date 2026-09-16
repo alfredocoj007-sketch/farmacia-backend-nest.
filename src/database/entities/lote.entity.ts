@@ -16,10 +16,10 @@ import { TransferenciaDetalle } from "./transferencia-detalle.entity";
 @Index("UQ_LOTE_PRODUCTO", ["productoId", "numeroLote"], { unique: true })
 @Entity("LOTE")
 export class Lote {
-  @Column("number", { name: "PRODUCTO_ID", unique: true })
+  @Column("number", { name: "PRODUCTO_ID" })
   productoId: number;
 
-  @Column("varchar2", { name: "NUMERO_LOTE", unique: true, length: 80 })
+  @Column("varchar2", { name: "NUMERO_LOTE", length: 80 })
   numeroLote: string;
 
   @PrimaryGeneratedColumn({ type: "number", name: "LOTE_ID" })
