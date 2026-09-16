@@ -124,6 +124,7 @@ export class LotesService {
 
         const inventario = await manager.findOne(Inventario, {
           where: { sucursalId: dto.sucursalId, loteId: dto.loteId },
+          relations: { sucursal: true },
         });
 
         if (!inventario || Number(inventario.cantidadDisponible) < dto.cantidad) {
@@ -139,6 +140,7 @@ export class LotesService {
         const inventarios = await manager
           .createQueryBuilder(Inventario, 'inventario')
           .innerJoinAndSelect('inventario.lote', 'lote')
+          .leftJoinAndSelect('inventario.sucursal', 'sucursal')
           .where('lote.productoId = :productoId', { productoId: dto.productoId })
           .andWhere('inventario.sucursalId = :sucursalId', { sucursalId: dto.sucursalId })
           .andWhere('inventario.cantidadDisponible > 0')
