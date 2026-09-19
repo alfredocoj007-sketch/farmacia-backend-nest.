@@ -19,7 +19,7 @@ export class PlanillaDetalle {
   @Column("number", { name: "SALARIO_BASE", precision: 18, scale: 2 })
   salarioBase: number;
 
-  @Column("number", { name: "PLANILLA_ID", unique: true })
+  @Column("number", { name: "PLANILLA_ID" })
   planillaId: number;
 
   @PrimaryGeneratedColumn({ type: "number", name: "PLANILLA_DETALLE_ID" })
@@ -33,7 +33,7 @@ export class PlanillaDetalle {
   })
   horasExtra: number;
 
-  @Column("number", { name: "EMPLEADO_ID", unique: true })
+  @Column("number", { name: "EMPLEADO_ID" })
   empleadoId: number;
 
   @Column("number", {

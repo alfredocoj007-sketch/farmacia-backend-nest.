@@ -53,6 +53,21 @@ export class Planilla {
   })
   estado: string;
 
+  @Column("varchar2", {
+    name: "CUENTA_ORIGEN",
+    length: 120,
+    nullable: true,
+  })
+  cuentaOrigen: string | null;
+
+  @Column("varchar2", {
+    name: "METODO_PAGO",
+    length: 50,
+    nullable: true,
+    default: () => "'TRANSFERENCIA_BANCARIA'",
+  })
+  metodoPago: string | null;
+
   @OneToMany(
     () => PlanillaDetalle,
     (planillaDetalle) => planillaDetalle.planilla
