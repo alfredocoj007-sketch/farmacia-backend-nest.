@@ -17,19 +17,19 @@ export class PedidoDetalle {
   @Column("number", { name: "SUBTOTAL", precision: 18, scale: 2 })
   subtotal: number;
 
-  @Column("number", { name: "PRODUCTO_ID", unique: true })
+  @Column("number", { name: "PRODUCTO_ID" })
   productoId: number;
 
   @Column("number", { name: "PRECIO_UNITARIO", precision: 18, scale: 2 })
   precioUnitario: number;
 
-  @Column("number", { name: "PEDIDO_ID", unique: true })
+  @Column("number", { name: "PEDIDO_ID" })
   pedidoId: number;
 
   @PrimaryGeneratedColumn({ type: "number", name: "PEDIDO_DETALLE_ID" })
   pedidoDetalleId: number;
 
-  @Column("number", { name: "LOTE_ID", nullable: true, unique: true })
+  @Column("number", { name: "LOTE_ID", nullable: true })
   loteId: number | null;
 
   @Column("number", { name: "CANTIDAD", precision: 18, scale: 3 })
