@@ -14,7 +14,7 @@ import { SesionCaja } from "./sesion-caja.entity";
 @Index("UQ_CAJA_CODIGO", ["sucursalId", "codigoCaja"], { unique: true })
 @Entity("CAJA")
 export class Caja {
-  @Column("number", { name: "SUCURSAL_ID", unique: true })
+  @Column("number", { name: "SUCURSAL_ID" })
   sucursalId: number;
 
   @Column("varchar2", { name: "ESTADO", length: 20, default: () => "'ACTIVA'" })
