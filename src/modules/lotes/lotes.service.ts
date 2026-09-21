@@ -7,8 +7,11 @@ import { Sucursal } from '../../database/entities/sucursal.entity';
 import { Inventario } from '../../database/entities/inventario.entity';
 import { MovimientoInventario } from '../../database/entities/movimiento-inventario.entity';
 import { CreateEntradaLoteDto } from './dto/create-entrada-lote.dto';
+import { CreateCompraLoteDto } from './dto/create-compra-lote.dto';
 import { CreateSalidaLoteDto } from './dto/create-salida-lote.dto';
 import { QueryLotesDto } from './dto/query-lotes.dto';
+import { QueryMovimientosDto } from './dto/query-movimientos.dto';
+import { Laboratorio } from '../../database/entities/laboratorio.entity';
 import type { AuthenticatedUser } from '../auth/strategies/jwt.strategy';
 
 @Injectable()
@@ -90,6 +93,130 @@ export class LotesService {
       const movimientoGuardado = await manager.save(movimiento);
 
       return { lote, inventario, movimiento: movimientoGuardado };
+    });
+  }
+
+  async registrarCompra(dto: CreateCompraLoteDto) {
+    if (!dto.items || dto.items.length === 0) {
+      throw new BadRequestException('La compra debe contener al menos un producto en el detalle.');
+    }
+
+    const sucursal = await this.sucursalRepo.findOne({ where: { sucursalId: dto.sucursalId } });
+    if (!sucursal) {
+      throw new NotFoundException(`No existe la sucursal destino #${dto.sucursalId}.`);
+    }
+
+    let proveedorNombre = dto.proveedorNombre?.trim() || null;
+    if (dto.proveedorId) {
+      const lab = await this.dataSource.getRepository(Laboratorio).findOne({
+        where: { laboratorioId: dto.proveedorId },
+      });
+      if (lab) {
+        proveedorNombre = lab.nombre;
+      }
+    }
+
+    return this.dataSource.transaction(async (manager) => {
+      const resultados: any[] = [];
+      let totalMonto = 0;
+      let totalUnidades = 0;
+
+      for (const item of dto.items) {
+        const producto = await manager.findOne(Producto, { where: { productoId: item.productoId } });
+        if (!producto) {
+          throw new NotFoundException(`No existe el producto con ID #${item.productoId}.`);
+        }
+        if (producto.estado !== 'ACTIVO') {
+          throw new BadRequestException(`El producto "${producto.nombre}" está inactivo y no puede recibir mercadería.`);
+        }
+
+        const numLoteClean = item.numeroLote.trim();
+        let lote = await manager.findOne(Lote, {
+          where: { productoId: item.productoId, numeroLote: numLoteClean },
+        });
+
+        if (!lote) {
+          lote = manager.create(Lote, {
+            productoId: item.productoId,
+            numeroLote: numLoteClean,
+            fechaVencimiento: new Date(item.fechaVencimiento),
+            fechaFabricacion: item.fechaFabricacion ? new Date(item.fechaFabricacion) : null,
+            costoUnitario: Number(item.costoUnitario),
+          });
+          lote = await manager.save(lote);
+        } else {
+          // Si el lote ya existe en el catálogo, actualizamos costo de compra y vencimiento
+          lote.costoUnitario = Number(item.costoUnitario);
+          if (item.fechaVencimiento) {
+            lote.fechaVencimiento = new Date(item.fechaVencimiento);
+          }
+          lote = await manager.save(lote);
+        }
+
+        let inventario = await manager.findOne(Inventario, {
+          where: { sucursalId: dto.sucursalId, loteId: lote.loteId },
+        });
+
+        const cantidadAnterior = inventario ? Number(inventario.cantidadDisponible) : 0;
+        const cantidadNueva = cantidadAnterior + Number(item.cantidad);
+
+        if (!inventario) {
+          inventario = manager.create(Inventario, {
+            sucursalId: dto.sucursalId,
+            loteId: lote.loteId,
+            cantidadDisponible: cantidadNueva,
+            fechaActualizacion: new Date(),
+          });
+        } else {
+          inventario.cantidadDisponible = cantidadNueva;
+          inventario.fechaActualizacion = new Date();
+        }
+        inventario = await manager.save(inventario);
+
+        const subtotal = Number(item.cantidad) * Number(item.costoUnitario);
+        totalUnidades += Number(item.cantidad);
+        totalMonto += subtotal;
+
+        const infoProveedor = proveedorNombre ? ` - Proveedor: ${proveedorNombre}` : '';
+        const infoObs = dto.observacion?.trim() ? ` [${dto.observacion.trim()}]` : '';
+        const observacionFinal = `Factura #${dto.numeroFactura.trim()} (${dto.fechaFactura})${infoProveedor}${infoObs}`;
+
+        const movimiento = manager.create(MovimientoInventario, {
+          tipoMovimiento: 'ENTRADA',
+          referenciaTipo: 'COMPRA',
+          referenciaId: lote.loteId,
+          observacion: observacionFinal,
+          cantidadAnterior,
+          cantidad: Number(item.cantidad),
+          cantidadNueva,
+          inventario,
+        });
+        const movimientoGuardado = await manager.save(movimiento);
+
+        resultados.push({
+          productoId: producto.productoId,
+          nombreProducto: producto.nombre,
+          numeroLote: lote.numeroLote,
+          cantidad: item.cantidad,
+          costoUnitario: item.costoUnitario,
+          subtotal: Number(subtotal.toFixed(2)),
+          cantidadNueva,
+          movimientoId: movimientoGuardado.movimientoInventarioId,
+        });
+      }
+
+      return {
+        mensaje: 'Factura de compra e inventario procesados exitosamente.',
+        numeroFactura: dto.numeroFactura,
+        fechaFactura: dto.fechaFactura,
+        proveedor: proveedorNombre ?? 'No especificado',
+        sucursalId: dto.sucursalId,
+        sucursalNombre: sucursal.nombre,
+        totalItems: dto.items.length,
+        totalUnidades,
+        totalMonto: Number(totalMonto.toFixed(2)),
+        detalles: resultados,
+      };
     });
   }
 
@@ -216,6 +343,9 @@ export class LotesService {
     const qb = this.loteRepo
       .createQueryBuilder('lote')
       .leftJoinAndSelect('lote.producto', 'producto')
+      .leftJoinAndSelect('producto.categoria', 'categoria')
+      .leftJoinAndSelect('producto.laboratorio', 'laboratorio')
+      .leftJoinAndSelect('producto.unidadMedida', 'unidadMedida')
       .leftJoinAndSelect('lote.inventarios', 'inventario')
       .leftJoinAndSelect('inventario.sucursal', 'sucursal')
       .orderBy('lote.fechaVencimiento', 'ASC')
@@ -228,6 +358,26 @@ export class LotesService {
 
     const [data, total] = await qb.getManyAndCount();
 
+    if (data.length > 0) {
+      const loteIds = data.map((l) => l.loteId);
+      const counts = await this.dataSource
+        .getRepository(MovimientoInventario)
+        .createQueryBuilder('m')
+        .innerJoin('m.inventario', 'inv')
+        .select('inv.loteId', 'loteId')
+        .addSelect('COUNT(m.movimientoInventarioId)', 'count')
+        .where('inv.loteId IN (:...loteIds)', { loteIds })
+        .groupBy('inv.loteId')
+        .getRawMany();
+
+      const countMap = new Map(counts.map((c) => [Number(c.loteId || c.LOTEID), Number(c.count || c.COUNT)]));
+      data.forEach((l: any) => {
+        const movCount = countMap.get(l.loteId) ?? 0;
+        l.totalMovimientos = movCount;
+        l.tieneKardex = movCount > 0;
+      });
+    }
+
     return { data, total, page, limit };
   }
 
@@ -235,7 +385,11 @@ export class LotesService {
     const lote = await this.loteRepo.findOne({
       where: { loteId },
       relations: {
-        producto: true,
+        producto: {
+          categoria: true,
+          laboratorio: true,
+          unidadMedida: true,
+        },
         inventarios: { sucursal: true },
       },
     });
@@ -243,6 +397,15 @@ export class LotesService {
     if (!lote) {
       throw new NotFoundException(`No existe un lote con id ${loteId}.`);
     }
+
+    const movCount = await this.dataSource
+      .getRepository(MovimientoInventario)
+      .createQueryBuilder('m')
+      .innerJoin('m.inventario', 'inv')
+      .where('inv.loteId = :loteId', { loteId })
+      .getCount();
+    (lote as any).totalMovimientos = movCount;
+    (lote as any).tieneKardex = movCount > 0;
 
     return lote;
   }
@@ -258,6 +421,70 @@ export class LotesService {
       .leftJoinAndSelect('inventarioSelect.sucursal', 'sucursal')
       .where('inventario.loteId = :loteId', { loteId })
       .orderBy('movimiento.fechaMovimiento', 'ASC')
+      .addOrderBy('movimiento.movimientoInventarioId', 'ASC')
       .getMany();
   }
+
+  async findAllMovimientos(query: QueryMovimientosDto) {
+    const page = query.page ?? 1;
+    const limit = query.limit ?? 50;
+
+    const qb = this.dataSource
+      .getRepository(MovimientoInventario)
+      .createQueryBuilder('movimiento')
+      .innerJoinAndSelect('movimiento.inventario', 'inventario')
+      .leftJoinAndSelect('inventario.sucursal', 'sucursal')
+      .leftJoinAndSelect('inventario.lote', 'lote')
+      .leftJoinAndSelect('lote.producto', 'producto')
+      .leftJoinAndSelect('producto.laboratorio', 'laboratorio')
+      .leftJoinAndSelect('producto.categoria', 'categoria')
+      .orderBy('movimiento.fechaMovimiento', 'DESC')
+      .addOrderBy('movimiento.movimientoInventarioId', 'DESC')
+      .skip((page - 1) * limit)
+      .take(limit);
+
+    if (query.sucursalId) {
+      qb.andWhere('inventario.sucursalId = :sucursalId', { sucursalId: query.sucursalId });
+    }
+
+    if (query.productoId) {
+      qb.andWhere('lote.productoId = :productoId', { productoId: query.productoId });
+    }
+
+    if (query.loteId) {
+      qb.andWhere('inventario.loteId = :loteId', { loteId: query.loteId });
+    }
+
+    if (query.tipoMovimiento) {
+      qb.andWhere('movimiento.tipoMovimiento = :tipoMovimiento', {
+        tipoMovimiento: query.tipoMovimiento.toUpperCase(),
+      });
+    }
+
+    if (query.busqueda) {
+      const q = `%${query.busqueda.trim().toLowerCase()}%`;
+      qb.andWhere(
+        '(LOWER(producto.nombre) LIKE :q OR LOWER(lote.numeroLote) LIKE :q OR LOWER(movimiento.observacion) LIKE :q OR LOWER(movimiento.referenciaTipo) LIKE :q)',
+        { q },
+      );
+    }
+
+    if (query.fechaDesde) {
+      qb.andWhere('movimiento.fechaMovimiento >= :fechaDesde', {
+        fechaDesde: new Date(query.fechaDesde),
+      });
+    }
+
+    if (query.fechaHasta) {
+      const fechaFin = new Date(query.fechaHasta);
+      fechaFin.setHours(23, 59, 59, 999);
+      qb.andWhere('movimiento.fechaMovimiento <= :fechaHasta', {
+        fechaHasta: fechaFin,
+      });
+    }
+
+    const [data, total] = await qb.getManyAndCount();
+    return { data, total, page, limit };
+  }
 }
+

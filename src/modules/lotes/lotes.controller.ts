@@ -1,8 +1,10 @@
 import { Body, Controller, Get, Param, ParseIntPipe, Post, Query, UseGuards } from '@nestjs/common';
 import { LotesService } from './lotes.service';
 import { CreateEntradaLoteDto } from './dto/create-entrada-lote.dto';
+import { CreateCompraLoteDto } from './dto/create-compra-lote.dto';
 import { CreateSalidaLoteDto } from './dto/create-salida-lote.dto';
 import { QueryLotesDto } from './dto/query-lotes.dto';
+import { QueryMovimientosDto } from './dto/query-movimientos.dto';
 import { JwtAuthGuard } from '../auth/guards/jwt-auth.guard';
 import { RolesGuard } from '../auth/guards/roles.guard';
 import { Roles } from '../auth/decorators/roles.decorator';
@@ -15,14 +17,21 @@ export class LotesController {
   constructor(private readonly lotesService: LotesService) {}
 
   @UseGuards(RolesGuard)
-  @Roles('ADMIN')
+  @Roles('ADMIN', 'FARMACEUTICO')
   @Post('entrada')
   registrarEntrada(@Body() dto: CreateEntradaLoteDto) {
     return this.lotesService.registrarEntrada(dto);
   }
 
   @UseGuards(RolesGuard)
-  @Roles('ADMIN', 'VENDEDOR')
+  @Roles('ADMIN', 'FARMACEUTICO')
+  @Post('compra')
+  registrarCompra(@Body() dto: CreateCompraLoteDto) {
+    return this.lotesService.registrarCompra(dto);
+  }
+
+  @UseGuards(RolesGuard)
+  @Roles('ADMIN', 'VENDEDOR', 'FARMACEUTICO', 'GERENTE')
   @Post('salida')
   registrarSalida(@Body() dto: CreateSalidaLoteDto, @CurrentUser() user: AuthenticatedUser) {
     return this.lotesService.registrarSalida(dto, user);
@@ -31,6 +40,11 @@ export class LotesController {
   @Get()
   findAll(@Query() query: QueryLotesDto) {
     return this.lotesService.findAll(query);
+  }
+
+  @Get('movimientos/todos')
+  findAllMovimientos(@Query() query: QueryMovimientosDto) {
+    return this.lotesService.findAllMovimientos(query);
   }
 
   @Get(':id')

@@ -13,13 +13,13 @@ import { Transferencia } from "./transferencia.entity";
 @Index("UQ_TRANS_DET", ["transferenciaId", "loteId"], { unique: true })
 @Entity("TRANSFERENCIA_DETALLE")
 export class TransferenciaDetalle {
-  @Column("number", { name: "TRANSFERENCIA_ID", unique: true })
+  @Column("number", { name: "TRANSFERENCIA_ID" })
   transferenciaId: number;
 
   @PrimaryGeneratedColumn({ type: "number", name: "TRANSFERENCIA_DETALLE_ID" })
   transferenciaDetalleId: number;
 
-  @Column("number", { name: "LOTE_ID", unique: true })
+  @Column("number", { name: "LOTE_ID" })
   loteId: number;
 
   @Column("number", { name: "CANTIDAD_SOLICITADA", precision: 18, scale: 3 })
