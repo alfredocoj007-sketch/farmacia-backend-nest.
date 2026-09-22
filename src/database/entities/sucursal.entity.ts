@@ -40,12 +40,10 @@ export class Sucursal {
   @Column("number", {
     name: "LONGITUD",
     nullable: true,
-    precision: 9,
-    scale: 6,
   })
   longitud: number | null;
 
-  @Column("number", { name: "LATITUD", nullable: true, precision: 9, scale: 6 })
+  @Column("number", { name: "LATITUD", nullable: true })
   latitud: number | null;
 
   @Column("date", { name: "FECHA_APERTURA", default: () => "SYSDATE" })

@@ -21,7 +21,7 @@ export class Municipio {
   @PrimaryGeneratedColumn({ type: "number", name: "MUNICIPIO_ID" })
   municipioId: number;
 
-  @Column("number", { name: "DEPARTAMENTO_ID", unique: true })
+  @Column("number", { name: "DEPARTAMENTO_ID" })
   departamentoId: number;
 
   @OneToMany(() => Cliente, (cliente) => cliente.municipio)

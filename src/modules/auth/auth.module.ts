@@ -7,11 +7,12 @@ import { AuthController } from './auth.controller';
 import { AuthService } from './auth.service';
 import { JwtStrategy } from './strategies/jwt.strategy';
 import { Credencial } from '../../database/entities/credencial.entity';
+import { AuditoriaEvento } from '../../database/entities/auditoria-evento.entity';
 import jwtConfig from '../../config/jwt.config';
 
 @Module({
   imports: [
-    TypeOrmModule.forFeature([Credencial]),
+    TypeOrmModule.forFeature([Credencial, AuditoriaEvento]),
     PassportModule.register({ defaultStrategy: 'jwt' }),
 
     JwtModule.registerAsync({

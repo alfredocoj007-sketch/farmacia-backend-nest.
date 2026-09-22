@@ -6,6 +6,7 @@ import * as bcrypt from 'bcrypt';
 
 import { LoginDto } from './dto/login.dto';
 import { Credencial } from '../../database/entities/credencial.entity';
+import { AuditoriaEvento } from '../../database/entities/auditoria-evento.entity';
 
 @Injectable()
 export class AuthService {
@@ -14,6 +15,9 @@ export class AuthService {
   constructor(
     @InjectRepository(Credencial)
     private readonly credencialRepo: Repository<Credencial>,
+
+    @InjectRepository(AuditoriaEvento)
+    private readonly auditoriaRepo: Repository<AuditoriaEvento>,
 
     private readonly jwtService: JwtService,
   ) {}
@@ -31,12 +35,14 @@ export class AuthService {
       .getOne();
 
     if (!credencial) {
+      await this.auditarIntentoFallido(dto.username, 'Usuario no encontrado');
       throw new UnauthorizedException(
         'Usuario o contraseña incorrectos.',
       );
     }
 
     if (credencial.estado !== 'ACTIVO') {
+      await this.auditarIntentoFallido(dto.username, 'Usuario inactivo');
       throw new UnauthorizedException(
         'El usuario está inactivo.',
       );
@@ -48,6 +54,7 @@ export class AuthService {
     );
 
     if (!passwordValido) {
+      await this.auditarIntentoFallido(dto.username, 'Contraseña inválida');
       throw new UnauthorizedException(
         'Usuario o contraseña incorrectos.',
       );
@@ -62,8 +69,22 @@ export class AuthService {
           ultimoLogin: new Date(),
         },
       );
+
+      await this.auditoriaRepo.save(
+        this.auditoriaRepo.create({
+          modulo: 'AUTH',
+          operacion: 'LOGIN',
+          tablaAfectada: 'CREDENCIAL',
+          registroId: credencial.credencialId,
+          clientIdentifier: credencial.username,
+          descripcion: `Inicio de sesión exitoso. Usuario: ${credencial.username} (Rol: ${credencial.rol?.nombre || 'SIN_ROL'}).`,
+          usuarioBd: 'FARMACIA_APP',
+          ipCliente: '127.0.0.1',
+          host: 'farma-client',
+        }),
+      );
     } catch (error) {
-      this.logger.error('No se pudo actualizar ultimoLogin:', error);
+      this.logger.error('No se pudo actualizar auditoría de login:', error);
     }
 
     const payload = {
@@ -72,6 +93,8 @@ export class AuthService {
       empleadoId: credencial.empleadoId,
       rolId: credencial.rol.rolId,
       rolNombre: credencial.rol.nombre,
+      sucursalId: credencial.empleado?.sucursal?.sucursalId ?? null,
+      sucursalNombre: credencial.empleado?.sucursal?.nombre ?? null,
     };
 
     return {
@@ -80,10 +103,32 @@ export class AuthService {
       usuario: {
         credencialId: credencial.credencialId,
         username: credencial.username,
-        nombre: `${credencial.empleado.nombre} ${credencial.empleado.apellido}`,
-        rol: credencial.rol.nombre,
-        sucursalId: credencial.empleado.sucursal.sucursalId,
+        nombre: credencial.empleado
+          ? `${credencial.empleado.nombre} ${credencial.empleado.apellido}`
+          : credencial.username,
+        rol: credencial.rol?.nombre ?? '',
+        sucursalId: credencial.empleado?.sucursal?.sucursalId ?? null,
+        sucursalNombre: credencial.empleado?.sucursal?.nombre ?? null,
       },
     };
+  }
+
+  private async auditarIntentoFallido(username: string, motivo: string) {
+    try {
+      await this.auditoriaRepo.save(
+        this.auditoriaRepo.create({
+          modulo: 'AUTH',
+          operacion: 'LOGIN_FALLIDO',
+          tablaAfectada: 'CREDENCIAL',
+          clientIdentifier: username || 'DESCONOCIDO',
+          descripcion: `Intento de acceso denegado para el usuario: ${username}. Causa: ${motivo}.`,
+          usuarioBd: 'FARMACIA_APP',
+          ipCliente: '127.0.0.1',
+          host: 'farma-client',
+        }),
+      );
+    } catch (e) {
+      this.logger.error('Error al auditar intento de login fallido:', e);
+    }
   }
 }
