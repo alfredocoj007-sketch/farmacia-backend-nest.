@@ -62,4 +62,5 @@ src/database/seed_oficial_farmacia.sql
 src/database/seed-oficial.ts
 src/database/seed-test.ts
 src/database/reset-db.ts
+src/database/reset-admin.ts
 *.sql
