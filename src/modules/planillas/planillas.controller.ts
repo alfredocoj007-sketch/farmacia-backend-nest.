@@ -26,7 +26,7 @@ import { PagarPlanillaDto } from './dto/pagar-planilla.dto';
 
 @Controller('planillas')
 @UseGuards(JwtAuthGuard, RolesGuard)
-@Roles('ADMIN')
+@Roles('ADMIN', 'GERENTE')
 export class PlanillasController {
   constructor(private readonly planillasService: PlanillasService) {}
 

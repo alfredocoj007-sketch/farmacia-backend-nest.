@@ -65,8 +65,9 @@ export class VentasService {
     clienteDto?: CreateVentaPosDto['cliente'],
     sucursal?: Sucursal | null,
   ): Promise<Cliente> {
-    const nit = (clienteDto?.nit || 'CF').trim().toUpperCase();
-    const esCF = nit === 'CF' || nit === 'C/F' || nit === 'CONSUMIDOR FINAL';
+    const rawNit = (clienteDto?.nit || 'CF').trim().toUpperCase();
+    const esCF = !rawNit || rawNit === 'CF' || rawNit === 'C/F' || rawNit === 'CONSUMIDOR FINAL';
+    const nit = esCF ? 'CF' : rawNit;
 
     // Obtener un municipio válido para satisfacer la restricción NOT NULL en BD Oracle
     let municipio = sucursal?.municipio;
@@ -97,16 +98,40 @@ export class VentasService {
     }
 
     // Cliente con NIT específico
-    const telefono = (clienteDto?.telefono || `NIT-${nit}`).slice(0, 30);
-    let cliente = await this.clienteRepo.findOne({ where: { telefono } });
+    const telefonoNit = `NIT-${nit}`.slice(0, 30);
+    const nombreLimpio =
+      clienteDto?.nombre &&
+      clienteDto.nombre.trim() &&
+      !clienteDto.nombre.toLowerCase().includes('consumidor final')
+        ? clienteDto.nombre.trim().slice(0, 100)
+        : `Contribuyente NIT ${nit}`;
+    const direccionLimpia =
+      clienteDto?.direccion && clienteDto.direccion.trim()
+        ? clienteDto.direccion.trim().slice(0, 400)
+        : 'Ciudad de Guatemala';
 
-    if (!cliente) {
-      const nombreCompleto = clienteDto?.nombre?.trim() || `Contribuyente NIT ${nit}`;
+    // Buscar si ya existe este cliente por NIT (por apellido 'NIT: <nit>', telefono 'NIT-<nit>' o referencia)
+    let cliente = await this.clienteRepo
+      .createQueryBuilder('c')
+      .where('c.apellido = :nitAp', { nitAp: `NIT: ${nit}` })
+      .orWhere('c.telefono = :telNit', { telNit: telefonoNit })
+      .orWhere('c.referenciaDireccion = :refNit', { refNit: `Facturación FEL NIT ${nit}` })
+      .getOne();
+
+    if (cliente) {
+      // Actualizar datos del cliente con el nombre y NIT actuales
+      cliente.nombre = nombreLimpio;
+      cliente.apellido = `NIT: ${nit}`;
+      cliente.direccion = direccionLimpia;
+      cliente.referenciaDireccion = `Facturación FEL NIT ${nit}`;
+      cliente = await this.clienteRepo.save(cliente);
+    } else {
+      // Crear nuevo cliente con NIT
       cliente = this.clienteRepo.create({
-        nombre: nombreCompleto.slice(0, 100),
+        nombre: nombreLimpio,
         apellido: `NIT: ${nit}`,
-        telefono,
-        direccion: clienteDto?.direccion?.trim() || 'Ciudad de Guatemala',
+        telefono: telefonoNit,
+        direccion: direccionLimpia,
         estado: 'ACTIVO',
         referenciaDireccion: `Facturación FEL NIT ${nit}`,
         municipio,
@@ -218,6 +243,10 @@ export class VentasService {
     const montoRecibido = dto.montoRecibido ? Number(dto.montoRecibido) : totalVenta;
     const cambio = Number(Math.max(0, montoRecibido - totalVenta).toFixed(2));
 
+    const rawNit = (dto.cliente?.nit || 'CF').trim().toUpperCase();
+    const esCF = !rawNit || rawNit === 'CF' || rawNit === 'C/F' || rawNit === 'CONSUMIDOR FINAL';
+    const nit = esCF ? 'CF' : rawNit;
+
     // 1. Guardar el PEDIDO (Origen: SUCURSAL)
     const nuevoPedido = this.pedidoRepo.create({
       cliente,
@@ -228,7 +257,11 @@ export class VentasService {
       fechaPedido: new Date(),
       fechaConfirmacion: new Date(),
       estado: 'ENTREGADO',
-      observacion: dto.observacion?.trim() || `Venta rápida mostrador POS en ${sucursal.nombre}`,
+      observacion:
+        dto.observacion?.trim() ||
+        (!esCF
+          ? `Venta mostrador POS - NIT: ${nit}`
+          : `Venta rápida mostrador POS en ${sucursal.nombre}`),
     });
     const pedidoGuardado = await this.pedidoRepo.save(nuevoPedido);
 
@@ -281,8 +314,13 @@ export class VentasService {
 
     sesionActiva = await sesionQuery.orderBy('sesion.fechaApertura', 'DESC').getOne();
 
-    if (sesionActiva) {
-      cajaCodigo = sesionActiva.caja.codigoCaja;
+    if (!sesionActiva) {
+      throw new BadRequestException(
+        `No es posible procesar el cobro: No existe un turno de caja abierto en la sucursal "${sucursal.nombre}". El cajero debe realizar la apertura formal de turno antes de cobrar.`,
+      );
+    }
+
+    cajaCodigo = sesionActiva.caja.codigoCaja;
 
       let empleadoCobro = null;
       if (usuario?.empleadoId) {
@@ -313,11 +351,6 @@ export class VentasService {
       this.logger.log(
         `Ingreso registrado en Caja ${cajaCodigo} (Sesión #${sesionActiva.sesionCajaId}) por Q${totalVenta}`,
       );
-    } else {
-      this.logger.warn(
-        `Venta #${pedidoGuardado.pedidoId} registrada sin turno de caja activo en sucursal ${sucursal.nombre}.`,
-      );
-    }
 
     // 4. Estructura Oficial Factura Electrónica FEL (SAT Guatemala)
     const serieFEL = `FARM${String(sucursal.sucursalId).padStart(2, '0')}`;
@@ -341,8 +374,12 @@ export class VentasService {
         telefono: sucursal.telefono,
       },
       receptor: {
-        nit: (dto.cliente?.nit || 'CF').trim().toUpperCase(),
-        nombre: cliente.nombre + (cliente.apellido ? ` ${cliente.apellido}` : ''),
+        nit: esCF ? 'CF' : nit,
+        nombre: esCF
+          ? 'Consumidor Final (C/F)'
+          : (cliente.nombre && !cliente.nombre.toLowerCase().includes('consumidor final')
+              ? cliente.nombre
+              : dto.cliente?.nombre?.trim() || `Contribuyente NIT ${nit}`),
         direccion: cliente.direccion,
       },
       totales: {
@@ -359,10 +396,12 @@ export class VentasService {
     try {
       await this.auditoriaService.registrarEvento({
         modulo: 'VENTAS_POS',
-        operacion: 'VENTA_POS_REGISTRADA',
+        operacion: 'INSERT',
         tablaAfectada: 'PEDIDO',
         registroId: pedidoGuardado.pedidoId,
-        descripcion: `Venta mostrador Factura #${numeroFactura} por Q${totalVenta} registrada en ${sucursal.nombre} (${metodoPago.nombre})`,
+        descripcion: `Venta mostrador Factura #${numeroFactura} por Q${totalVenta} registrada en ${sucursal.nombre} (${metodoPago.nombre}).`,
+        clientIdentifier: usuario?.username || 'cajero',
+        usuarioBd: usuario?.username || 'FARMACIA_APP',
       });
     } catch (e) {
       this.logger.warn('No se pudo registrar auditoría de venta:', e);
@@ -377,6 +416,11 @@ export class VentasService {
       sucursal: {
         sucursalId: sucursal.sucursalId,
         nombre: sucursal.nombre,
+      },
+      cliente: {
+        nombre: felData.receptor.nombre,
+        nit: felData.receptor.nit,
+        direccion: cliente.direccion,
       },
       fel: felData,
       items: lineasProcesadas.map((l) => ({
@@ -441,9 +485,32 @@ export class VentasService {
         estado: p.estado,
         metodoPago: p.metodoPago?.nombre || 'EFECTIVO',
         sucursal: p.sucursalPreparacion?.nombre,
-        cliente: p.cliente
-          ? `${p.cliente.nombre} ${p.cliente.apellido || ''}`.trim()
-          : 'Consumidor Final',
+        cliente: (() => {
+          if (!p.cliente) return 'Consumidor Final (C/F)';
+          const nom = p.cliente.nombre?.trim() || '';
+          const ape = p.cliente.apellido?.trim() || '';
+          if (nom.toLowerCase().includes('consumidor') && (ape.toLowerCase().includes('final') || !ape)) {
+            return 'Consumidor Final (C/F)';
+          }
+          if (ape.startsWith('NIT:')) {
+            const nitVal = ape.replace('NIT:', '').trim();
+            return `${nom} (NIT: ${nitVal})`;
+          }
+          return `${nom} ${ape}`.trim() || 'Consumidor Final (C/F)';
+        })(),
+        nit: (() => {
+          if (p.cliente?.apellido?.startsWith('NIT: ')) {
+            return p.cliente.apellido.replace('NIT: ', '').trim();
+          }
+          if (p.cliente?.telefono?.startsWith('NIT-')) {
+            return p.cliente.telefono.replace('NIT-', '').trim();
+          }
+          if (p.observacion?.includes('NIT: ')) {
+            const match = p.observacion.match(/NIT:\s*([A-Za-z0-9-]+)/);
+            if (match) return match[1];
+          }
+          return 'CF';
+        })(),
         totalItems: p.pedidoDetalles?.length || 0,
         detalles: (p.pedidoDetalles || []).map((d) => ({
           producto: d.producto?.nombre,
@@ -481,29 +548,82 @@ export class VentasService {
     const baseImponible = Number((total / 1.12).toFixed(2));
     const iva = Number((total - baseImponible).toFixed(2));
     const sucursalId = p.sucursalPreparacion?.sucursalId || 1;
+    const sucursalNombre = p.sucursalPreparacion?.nombre || 'Sucursal Principal';
     const serie = `FARM${String(sucursalId).padStart(2, '0')}`;
     const numeroFactura = `${serie}-${String(p.pedidoId).padStart(8, '0')}`;
+    const autorizacionDte = `DTE-${p.pedidoId}-CERT-${String(p.fechaPedido.getTime()).slice(-8)}`;
+
+    let clienteNit = 'CF';
+    if (p.cliente?.apellido?.startsWith('NIT: ')) {
+      clienteNit = p.cliente.apellido.replace('NIT: ', '').trim();
+    } else if (p.cliente?.telefono?.startsWith('NIT-')) {
+      clienteNit = p.cliente.telefono.replace('NIT-', '').trim();
+    } else if (p.cliente?.referenciaDireccion?.includes('NIT ')) {
+      const match = p.cliente.referenciaDireccion.match(/NIT\s+([A-Za-z0-9-]+)/);
+      if (match) clienteNit = match[1];
+    } else if (p.observacion?.includes('NIT: ')) {
+      const match = p.observacion.match(/NIT:\s*([A-Za-z0-9-]+)/);
+      if (match) clienteNit = match[1];
+    }
+
+    let clienteNombre = 'Consumidor Final (C/F)';
+    if (p.cliente) {
+      const nom = p.cliente.nombre?.trim() || '';
+      const ape = p.cliente.apellido?.trim() || '';
+      if (
+        nom.toLowerCase().includes('consumidor') &&
+        (ape.toLowerCase().includes('final') || !ape)
+      ) {
+        clienteNombre = 'Consumidor Final (C/F)';
+      } else {
+        clienteNombre = ape.startsWith('NIT:') ? nom : `${nom} ${ape}`.trim();
+      }
+    }
+
+    const felData = {
+      autorizacionDte,
+      serie,
+      numeroFactura,
+      fechaCertificacion: p.fechaPedido,
+      emisor: {
+        nit: '9845120-K',
+        nombreComercial: `Farmacia ProSalud - ${sucursalNombre}`,
+        direccion: p.sucursalPreparacion?.direccion || 'Ciudad de Guatemala',
+      },
+      receptor: {
+        nit: clienteNit,
+        nombre: clienteNombre,
+      },
+      totales: {
+        baseImponible,
+        iva,
+        total,
+      },
+    };
 
     return {
       pedidoId: p.pedidoId,
-      numeroFactura,
-      serie,
-      autorizacionDte: `DTE-${p.pedidoId}-CERT-${String(p.fechaPedido.getTime()).slice(-8)}`,
+      fechaVenta: p.fechaPedido,
       fechaEmision: p.fechaPedido,
+      estado: p.estado,
+      total,
+      metodoPago: p.metodoPago?.nombre || 'EFECTIVO',
       sucursal: {
         sucursalId: p.sucursalPreparacion?.sucursalId,
-        nombre: p.sucursalPreparacion?.nombre,
+        nombre: sucursalNombre,
         direccion: p.sucursalPreparacion?.direccion,
         telefono: p.sucursalPreparacion?.telefono,
       },
       cliente: {
-        nombre: p.cliente
-          ? `${p.cliente.nombre} ${p.cliente.apellido || ''}`.trim()
-          : 'Consumidor Final',
+        nombre: clienteNombre,
+        nit: clienteNit,
         direccion: p.cliente?.direccion || 'Ciudad de Guatemala',
-        telefono: p.cliente?.telefono || '2000-0000',
+        telefono: p.cliente?.telefono || '',
       },
-      metodoPago: p.metodoPago?.nombre || 'EFECTIVO',
+      fel: felData,
+      numeroFactura,
+      serie,
+      autorizacionDte,
       totales: {
         baseImponible,
         iva,
@@ -529,6 +649,7 @@ export class VentasService {
     const qb = this.productoRepo
       .createQueryBuilder('p')
       .leftJoinAndSelect('p.categoria', 'cat')
+      .leftJoinAndSelect('p.unidadMedida', 'um')
       .where('p.estado = :est', { est: 'ACTIVO' });
 
     if (termino && termino.trim()) {
@@ -568,6 +689,8 @@ export class VentasService {
           nombre: prod.nombre,
           principioActivo: prod.principioActivo,
           presentacion: prod.presentacion,
+          unidadMedida: prod.unidadMedida?.nombre || null,
+          unidadMedidaAbrev: prod.unidadMedida?.abreviatura || null,
           categoria: prod.categoria?.nombre || 'General',
           requiereReceta: prod.requiereReceta === 'S',
           precioVenta: Number(prod.precioVenta),
@@ -615,6 +738,75 @@ export class VentasService {
       saldoInicial: Number(sesion.saldoInicial),
       totalIngresos: Number(sesion.totalIngresos),
       fechaApertura: sesion.fechaApertura,
+    };
+  }
+
+  /**
+   * Obtiene la disponibilidad de existencias de un medicamento en cada sucursal de la red
+   */
+  async obtenerStockRedProducto(productoId: number) {
+    const producto = await this.productoRepo.findOne({
+      where: { productoId },
+      relations: { categoria: true, laboratorio: true, unidadMedida: true },
+    });
+
+    if (!producto) {
+      throw new NotFoundException(`El producto #${productoId} no existe.`);
+    }
+
+    const sucursales = await this.sucursalRepo.find({
+      where: [{ estado: 'ACTIVA' }, { estado: 'ACTIVO' }],
+      order: { tipoSucursal: 'ASC', nombre: 'ASC' },
+    });
+
+    // Obtener inventarios con stock > 0 para este producto
+    const inventarios = await this.inventarioRepo
+      .createQueryBuilder('inv')
+      .innerJoinAndSelect('inv.lote', 'lote')
+      .where('lote.productoId = :productoId', { productoId })
+      .andWhere('inv.cantidadDisponible > 0')
+      .orderBy('lote.fechaVencimiento', 'ASC')
+      .getMany();
+
+    const sedes = sucursales.map((suc) => {
+      const invsSede = inventarios.filter(
+        (inv) => Number(inv.sucursalId) === Number(suc.sucursalId),
+      );
+
+      const stockDisponible = invsSede.reduce(
+        (sum, inv) => sum + Number(inv.cantidadDisponible),
+        0,
+      );
+
+      const proximoVencimiento =
+        invsSede.length > 0 ? invsSede[0].lote?.fechaVencimiento : null;
+
+      return {
+        sucursalId: suc.sucursalId,
+        nombre: suc.nombre,
+        tipoSucursal: suc.tipoSucursal,
+        direccion: suc.direccion || null,
+        telefono: suc.telefono || null,
+        stockDisponible,
+        totalLotes: invsSede.length,
+        proximoVencimiento,
+      };
+    });
+
+    return {
+      producto: {
+        productoId: producto.productoId,
+        codigoProducto: producto.codigoProducto,
+        nombre: producto.nombre,
+        principioActivo: producto.principioActivo,
+        presentacion: producto.presentacion,
+        concentracion: producto.concentracion,
+        unidadMedida: producto.unidadMedida?.nombre || null,
+        unidadMedidaAbrev: producto.unidadMedida?.abreviatura || null,
+        precioVenta: Number(producto.precioVenta),
+      },
+      sedes,
+      stockTotalRed: sedes.reduce((acc, s) => acc + s.stockDisponible, 0),
     };
   }
 }

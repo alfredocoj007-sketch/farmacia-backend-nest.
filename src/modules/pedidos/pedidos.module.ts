@@ -9,6 +9,10 @@ import { Sucursal } from '../../database/entities/sucursal.entity';
 import { Producto } from '../../database/entities/producto.entity';
 import { Inventario } from '../../database/entities/inventario.entity';
 import { Lote } from '../../database/entities/lote.entity';
+import { MovimientoInventario } from '../../database/entities/movimiento-inventario.entity';
+import { SesionCaja } from '../../database/entities/sesion-caja.entity';
+import { MovimientoCaja } from '../../database/entities/movimiento-caja.entity';
+import { Empleado } from '../../database/entities/empleado.entity';
 import { PedidosService } from './pedidos.service';
 import { PedidosController } from './pedidos.controller';
 import { AuthModule } from '../auth/auth.module';
@@ -25,6 +29,10 @@ import { AuthModule } from '../auth/auth.module';
       Producto,
       Inventario,
       Lote,
+      MovimientoInventario,
+      SesionCaja,
+      MovimientoCaja,
+      Empleado,
     ]),
     AuthModule,
   ],

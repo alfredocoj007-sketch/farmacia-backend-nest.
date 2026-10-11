@@ -14,6 +14,8 @@ import { QueryMovimientosDto } from './dto/query-movimientos.dto';
 import { Laboratorio } from '../../database/entities/laboratorio.entity';
 import type { AuthenticatedUser } from '../auth/strategies/jwt.strategy';
 
+import { AuditoriaService } from '../auditoria/auditoria.service';
+
 @Injectable()
 export class LotesService {
   constructor(
@@ -28,9 +30,11 @@ export class LotesService {
 
     @InjectRepository(Sucursal)
     private readonly sucursalRepo: Repository<Sucursal>,
+
+    private readonly auditoriaService: AuditoriaService,
   ) {}
 
-  async registrarEntrada(dto: CreateEntradaLoteDto) {
+  async registrarEntrada(dto: CreateEntradaLoteDto, user?: AuthenticatedUser) {
     const producto = await this.productoRepo.findOne({ where: { productoId: dto.productoId } });
     if (!producto) {
       throw new NotFoundException(`No existe un producto con id ${dto.productoId}.`);
@@ -44,7 +48,24 @@ export class LotesService {
       throw new NotFoundException(`No existe una sucursal con id ${dto.sucursalId}.`);
     }
 
-    return this.dataSource.transaction(async (manager) => {
+    const hoy = new Date();
+    hoy.setHours(0, 0, 0, 0);
+    const vencimiento = new Date(dto.fechaVencimiento);
+    if (isNaN(vencimiento.getTime()) || vencimiento <= hoy) {
+      throw new BadRequestException(
+        `La fecha de vencimiento (${dto.fechaVencimiento}) no es válida o ya caducó. Por regulación sanitaria no se permite ingresar medicamentos vencidos.`,
+      );
+    }
+    if (dto.fechaFabricacion) {
+      const fabricacion = new Date(dto.fechaFabricacion);
+      if (vencimiento <= fabricacion) {
+        throw new BadRequestException(
+          `La fecha de vencimiento debe ser posterior a la fecha de fabricación.`,
+        );
+      }
+    }
+
+    const res = await this.dataSource.transaction(async (manager) => {
       let lote = await manager.findOne(Lote, {
         where: { productoId: dto.productoId, numeroLote: dto.numeroLote },
       });
@@ -94,9 +115,23 @@ export class LotesService {
 
       return { lote, inventario, movimiento: movimientoGuardado };
     });
+
+    try {
+      await this.auditoriaService.registrarEvento({
+        modulo: 'INVENTARIO',
+        operacion: 'INSERT',
+        tablaAfectada: 'LOTE',
+        registroId: res.lote.loteId,
+        descripcion: `Entrada de inventario: Lote #${res.lote.numeroLote} (${dto.cantidad} uds) para "${producto.nombre}" en sucursal ${sucursal.nombre}. Costo: Q${dto.costoUnitario}.`,
+        clientIdentifier: user?.username || 'sistema',
+        usuarioBd: user?.username || 'FARMACIA_APP',
+      });
+    } catch (e) {}
+
+    return res;
   }
 
-  async registrarCompra(dto: CreateCompraLoteDto) {
+  async registrarCompra(dto: CreateCompraLoteDto, user?: AuthenticatedUser) {
     if (!dto.items || dto.items.length === 0) {
       throw new BadRequestException('La compra debe contener al menos un producto en el detalle.');
     }
@@ -116,7 +151,7 @@ export class LotesService {
       }
     }
 
-    return this.dataSource.transaction(async (manager) => {
+    const resCompra = await this.dataSource.transaction(async (manager) => {
       const resultados: any[] = [];
       let totalMonto = 0;
       let totalUnidades = 0;
@@ -128,6 +163,23 @@ export class LotesService {
         }
         if (producto.estado !== 'ACTIVO') {
           throw new BadRequestException(`El producto "${producto.nombre}" está inactivo y no puede recibir mercadería.`);
+        }
+
+        const hoy = new Date();
+        hoy.setHours(0, 0, 0, 0);
+        const vencimiento = new Date(item.fechaVencimiento);
+        if (isNaN(vencimiento.getTime()) || vencimiento <= hoy) {
+          throw new BadRequestException(
+            `El lote "${item.numeroLote}" del producto "${producto.nombre}" tiene una fecha de vencimiento no válida o ya caducada (${item.fechaVencimiento}). Por regulación sanitaria no se permite registrar medicamentos vencidos.`,
+          );
+        }
+        if (item.fechaFabricacion) {
+          const fabricacion = new Date(item.fechaFabricacion);
+          if (vencimiento <= fabricacion) {
+            throw new BadRequestException(
+              `El lote "${item.numeroLote}": la fecha de vencimiento debe ser posterior a la fecha de fabricación.`,
+            );
+          }
         }
 
         const numLoteClean = item.numeroLote.trim();
@@ -218,6 +270,19 @@ export class LotesService {
         detalles: resultados,
       };
     });
+
+    try {
+      await this.auditoriaService.registrarEvento({
+        modulo: 'INVENTARIO',
+        operacion: 'INSERT',
+        tablaAfectada: 'LOTE',
+        descripcion: `Compra de mercadería / Lotes: Factura #${dto.numeroFactura} en ${resCompra.sucursalNombre} (${resCompra.totalItems} productos, ${resCompra.totalUnidades} uds, Total: Q${resCompra.totalMonto}). Proveedor: ${resCompra.proveedor}.`,
+        clientIdentifier: user?.username || 'sistema',
+        usuarioBd: user?.username || 'FARMACIA_APP',
+      });
+    } catch (e) {}
+
+    return resCompra;
   }
 
   async registrarSalida(dto: CreateSalidaLoteDto, user: AuthenticatedUser) {
@@ -235,8 +300,8 @@ export class LotesService {
       throw new NotFoundException(`No existe una sucursal con id ${dto.sucursalId}.`);
     }
 
-    return this.dataSource.transaction(async (manager) => {
-      const movimientos: MovimientoInventario[] = [];
+    const movimientos = await this.dataSource.transaction(async (manager) => {
+      const movimientosList: MovimientoInventario[] = [];
 
       if (dto.loteId) {
         const lote = await manager.findOne(Lote, { where: { loteId: dto.loteId } });
@@ -260,7 +325,7 @@ export class LotesService {
           );
         }
 
-        movimientos.push(
+        movimientosList.push(
           await this.aplicarSalida(manager, inventario, dto.cantidad, dto.tipoMovimiento, lote.loteId, dto.observacion),
         );
       } else {
@@ -289,7 +354,7 @@ export class LotesService {
         for (const inventario of inventarios) {
           if (restante <= 0) break;
           const aConsumir = Math.min(restante, Number(inventario.cantidadDisponible));
-          movimientos.push(
+          movimientosList.push(
             await this.aplicarSalida(
               manager,
               inventario,
@@ -303,8 +368,21 @@ export class LotesService {
         }
       }
 
-      return movimientos;
+      return movimientosList;
     });
+
+    try {
+      await this.auditoriaService.registrarEvento({
+        modulo: 'INVENTARIO',
+        operacion: dto.tipoMovimiento === 'AJUSTE' ? 'AJUSTE' : 'EXCEPCION_MANUAL',
+        tablaAfectada: 'MOVIMIENTO_INVENTARIO',
+        descripcion: `Salida de inventario (${dto.tipoMovimiento}) de ${dto.cantidad} unidades para "${producto.nombre}" en ${sucursal.nombre}. Observación: ${dto.observacion || 'Sin observación'}.`,
+        clientIdentifier: user?.username || 'sistema',
+        usuarioBd: user?.username || 'FARMACIA_APP',
+      });
+    } catch (e) {}
+
+    return movimientos;
   }
 
   private async aplicarSalida(
@@ -345,9 +423,20 @@ export class LotesService {
       .leftJoinAndSelect('lote.producto', 'producto')
       .leftJoinAndSelect('producto.categoria', 'categoria')
       .leftJoinAndSelect('producto.laboratorio', 'laboratorio')
-      .leftJoinAndSelect('producto.unidadMedida', 'unidadMedida')
-      .leftJoinAndSelect('lote.inventarios', 'inventario')
-      .leftJoinAndSelect('inventario.sucursal', 'sucursal')
+      .leftJoinAndSelect('producto.unidadMedida', 'unidadMedida');
+
+    if (query.sucursalId) {
+      qb.innerJoinAndSelect(
+        'lote.inventarios',
+        'inventario',
+        'inventario.sucursalId = :sucursalId',
+        { sucursalId: query.sucursalId },
+      );
+    } else {
+      qb.leftJoinAndSelect('lote.inventarios', 'inventario');
+    }
+
+    qb.leftJoinAndSelect('inventario.sucursal', 'sucursal')
       .orderBy('lote.fechaVencimiento', 'ASC')
       .skip((page - 1) * limit)
       .take(limit);
@@ -360,15 +449,19 @@ export class LotesService {
 
     if (data.length > 0) {
       const loteIds = data.map((l) => l.loteId);
-      const counts = await this.dataSource
+      const countsQb = this.dataSource
         .getRepository(MovimientoInventario)
         .createQueryBuilder('m')
         .innerJoin('m.inventario', 'inv')
         .select('inv.loteId', 'loteId')
         .addSelect('COUNT(m.movimientoInventarioId)', 'count')
-        .where('inv.loteId IN (:...loteIds)', { loteIds })
-        .groupBy('inv.loteId')
-        .getRawMany();
+        .where('inv.loteId IN (:...loteIds)', { loteIds });
+
+      if (query.sucursalId) {
+        countsQb.andWhere('inv.sucursalId = :sucursalId', { sucursalId: query.sucursalId });
+      }
+
+      const counts = await countsQb.groupBy('inv.loteId').getRawMany();
 
       const countMap = new Map(counts.map((c) => [Number(c.loteId || c.LOTEID), Number(c.count || c.COUNT)]));
       data.forEach((l: any) => {
@@ -381,7 +474,7 @@ export class LotesService {
     return { data, total, page, limit };
   }
 
-  async findOne(loteId: number): Promise<Lote> {
+  async findOne(loteId: number, usuarioSucursalId?: number): Promise<Lote> {
     const lote = await this.loteRepo.findOne({
       where: { loteId },
       relations: {
@@ -398,22 +491,39 @@ export class LotesService {
       throw new NotFoundException(`No existe un lote con id ${loteId}.`);
     }
 
-    const movCount = await this.dataSource
+    if (usuarioSucursalId) {
+      const pertenece = (lote.inventarios || []).some(
+        (inv) => Number(inv.sucursalId) === Number(usuarioSucursalId),
+      );
+      if (!pertenece) {
+        throw new NotFoundException(`El lote #${loteId} no pertenece ni cuenta con inventario en su sucursal asignada.`);
+      }
+      lote.inventarios = (lote.inventarios || []).filter(
+        (inv) => Number(inv.sucursalId) === Number(usuarioSucursalId),
+      );
+    }
+
+    const countsQb = this.dataSource
       .getRepository(MovimientoInventario)
       .createQueryBuilder('m')
       .innerJoin('m.inventario', 'inv')
-      .where('inv.loteId = :loteId', { loteId })
-      .getCount();
+      .where('inv.loteId = :loteId', { loteId });
+
+    if (usuarioSucursalId) {
+      countsQb.andWhere('inv.sucursalId = :sucursalId', { sucursalId: usuarioSucursalId });
+    }
+
+    const movCount = await countsQb.getCount();
     (lote as any).totalMovimientos = movCount;
     (lote as any).tieneKardex = movCount > 0;
 
     return lote;
   }
 
-  async findMovimientos(loteId: number): Promise<MovimientoInventario[]> {
-    await this.findOne(loteId);
+  async findMovimientos(loteId: number, usuarioSucursalId?: number): Promise<MovimientoInventario[]> {
+    await this.findOne(loteId, usuarioSucursalId);
 
-    return this.dataSource
+    const qb = this.dataSource
       .getRepository(MovimientoInventario)
       .createQueryBuilder('movimiento')
       .innerJoin('movimiento.inventario', 'inventario')
@@ -421,8 +531,13 @@ export class LotesService {
       .leftJoinAndSelect('inventarioSelect.sucursal', 'sucursal')
       .where('inventario.loteId = :loteId', { loteId })
       .orderBy('movimiento.fechaMovimiento', 'ASC')
-      .addOrderBy('movimiento.movimientoInventarioId', 'ASC')
-      .getMany();
+      .addOrderBy('movimiento.movimientoInventarioId', 'ASC');
+
+    if (usuarioSucursalId) {
+      qb.andWhere('inventario.sucursalId = :sucursalId', { sucursalId: usuarioSucursalId });
+    }
+
+    return qb.getMany();
   }
 
   async findAllMovimientos(query: QueryMovimientosDto) {

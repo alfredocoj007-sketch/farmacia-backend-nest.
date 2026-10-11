@@ -11,10 +11,14 @@ import { Sucursal } from '../../database/entities/sucursal.entity';
 import { Lote } from '../../database/entities/lote.entity';
 import { Inventario } from '../../database/entities/inventario.entity';
 import { MovimientoInventario } from '../../database/entities/movimiento-inventario.entity';
+import { Producto } from '../../database/entities/producto.entity';
 import { CreateTransferenciaDto } from './dto/create-transferencia.dto';
 import { EnviarTransferenciaDto } from './dto/enviar-transferencia.dto';
 import { RecibirTransferenciaDto } from './dto/recibir-transferencia.dto';
 import { QueryTransferenciasDto } from './dto/query-transferencias.dto';
+import type { AuthenticatedUser } from '../auth/strategies/jwt.strategy';
+
+import { AuditoriaService } from '../auditoria/auditoria.service';
 
 @Injectable()
 export class TransferenciasService {
@@ -28,9 +32,13 @@ export class TransferenciasService {
     @InjectRepository(Lote)
     private readonly loteRepo: Repository<Lote>,
     private readonly dataSource: DataSource,
+    private readonly auditoriaService: AuditoriaService,
   ) {}
 
-  async create(dto: CreateTransferenciaDto): Promise<Transferencia> {
+  async create(
+    dto: CreateTransferenciaDto,
+    user?: AuthenticatedUser,
+  ): Promise<Transferencia> {
     if (dto.sucursalOrigenId === dto.sucursalDestinoId) {
       throw new BadRequestException(
         'La sucursal de origen y la sucursal de destino no pueden ser la misma.',
@@ -113,7 +121,23 @@ export class TransferenciasService {
       return guardada.transferenciaId;
     });
 
-    return this.findOne(resultId);
+    const guardadaCompleta = await this.findOne(resultId);
+
+    try {
+      await this.auditoriaService.registrarEvento({
+        modulo: 'TRANSFERENCIAS',
+        operacion: 'TRANSFERENCIA',
+        tablaAfectada: 'TRANSFERENCIA',
+        registroId: guardadaCompleta.transferenciaId,
+        descripcion: `Solicitud de traslado #TRF-${guardadaCompleta.transferenciaId}: ${sucursalOrigen.nombre} -> ${sucursalDestino.nombre} (${dto.detalles.length} lote(s) solicitados). ${dto.observacion ? 'Observación: ' + dto.observacion : ''}`.trim(),
+        clientIdentifier: user?.username || 'sistema',
+        usuarioBd: user?.username || 'FARMACIA_APP',
+      });
+    } catch (e) {
+      // no bloqueante
+    }
+
+    return guardadaCompleta;
   }
 
   async findAll(query: QueryTransferenciasDto) {
@@ -148,6 +172,13 @@ export class TransferenciasService {
       });
     }
 
+    if (query.sucursalId) {
+      qb.andWhere(
+        '(sucursalOrigen.sucursalId = :sucId OR sucursalDestino.sucursalId = :sucId)',
+        { sucId: query.sucursalId },
+      );
+    }
+
     const [data, total] = await qb.getManyAndCount();
 
     return { data, total, page, limit };
@@ -174,7 +205,11 @@ export class TransferenciasService {
     return transferencia;
   }
 
-  async enviar(id: number, dto: EnviarTransferenciaDto): Promise<Transferencia> {
+  async enviar(
+    id: number,
+    dto: EnviarTransferenciaDto,
+    user?: AuthenticatedUser,
+  ): Promise<Transferencia> {
     const transferencia = await this.findOne(id);
 
     if (transferencia.estado !== 'SOLICITADA') {
@@ -254,15 +289,42 @@ export class TransferenciasService {
       await manager.save(transferencia);
     });
 
-    return this.findOne(transferencia.transferenciaId);
+    const guardada = await this.findOne(transferencia.transferenciaId);
+
+    try {
+      await this.auditoriaService.registrarEvento({
+        modulo: 'TRANSFERENCIAS',
+        operacion: 'TRANSFERENCIA',
+        tablaAfectada: 'TRANSFERENCIA',
+        registroId: guardada.transferenciaId,
+        descripcion: `Despacho de Guía de Traslado #TRF-${guardada.transferenciaId}: ${guardada.sucursalOrigen.nombre} -> ${guardada.sucursalDestino.nombre}. Estado: EN_TRANSITO.`,
+        clientIdentifier: user?.username || 'sistema',
+        usuarioBd: user?.username || 'FARMACIA_APP',
+      });
+    } catch (e) {}
+
+    return guardada;
   }
 
-  async recibir(id: number, dto: RecibirTransferenciaDto): Promise<Transferencia> {
+  async recibir(
+    id: number,
+    dto: RecibirTransferenciaDto,
+    user?: AuthenticatedUser,
+  ): Promise<Transferencia> {
     const transferencia = await this.findOne(id);
 
     if (transferencia.estado !== 'EN_TRANSITO') {
       throw new BadRequestException(
         `Solo se pueden recibir transferencias en estado EN_TRANSITO. Estado actual: ${transferencia.estado}`,
+      );
+    }
+
+    if (
+      user?.sucursalId &&
+      Number(user.sucursalId) === Number(transferencia.sucursalOrigen.sucursalId)
+    ) {
+      throw new BadRequestException(
+        `Inconsistencia operativa: La sucursal de origen (${transferencia.sucursalOrigen.nombre}) no puede recibir su propio envío. La recepción física debe confirmarse por el personal de la sede de destino (${transferencia.sucursalDestino.nombre}).`,
       );
     }
 
@@ -339,10 +401,28 @@ export class TransferenciasService {
       await manager.save(transferencia);
     });
 
-    return this.findOne(transferencia.transferenciaId);
+    const guardada = await this.findOne(transferencia.transferenciaId);
+
+    try {
+      await this.auditoriaService.registrarEvento({
+        modulo: 'TRANSFERENCIAS',
+        operacion: 'TRANSFERENCIA',
+        tablaAfectada: 'TRANSFERENCIA',
+        registroId: guardada.transferenciaId,
+        descripcion: `Recepción física confirmada de Guía #TRF-${guardada.transferenciaId} en ${guardada.sucursalDestino.nombre}. Stock ingresado a inventario.`,
+        clientIdentifier: user?.username || 'sistema',
+        usuarioBd: user?.username || 'FARMACIA_APP',
+      });
+    } catch (e) {}
+
+    return guardada;
   }
 
-  async cancelar(id: number, observacion?: string): Promise<Transferencia> {
+  async cancelar(
+    id: number,
+    observacion?: string,
+    user?: AuthenticatedUser,
+  ): Promise<Transferencia> {
     const transferencia = await this.findOne(id);
 
     if (
@@ -400,6 +480,231 @@ export class TransferenciasService {
       await manager.save(transferencia);
     });
 
-    return this.findOne(transferencia.transferenciaId);
+    const cancelada = await this.findOne(transferencia.transferenciaId);
+
+    try {
+      await this.auditoriaService.registrarEvento({
+        modulo: 'TRANSFERENCIAS',
+        operacion: 'CANCELADA',
+        tablaAfectada: 'TRANSFERENCIA',
+        registroId: cancelada.transferenciaId,
+        descripcion: `Cancelación/Rechazo de transferencia #TRF-${cancelada.transferenciaId} (${cancelada.sucursalOrigen.nombre} -> ${cancelada.sucursalDestino.nombre}). Motivo: ${observacion || 'Sin motivo reportado'}.`,
+        clientIdentifier: user?.username || 'sistema',
+        usuarioBd: user?.username || 'FARMACIA_APP',
+      });
+    } catch (e) {}
+
+    return cancelada;
+  }
+
+  async getLotesDisponibles(sucursalOrigenId?: number) {
+    let origenId = sucursalOrigenId;
+    if (!origenId) {
+      const central = await this.sucursalRepo.findOne({
+        where: { tipoSucursal: 'BODEGA_CENTRAL' },
+      });
+      origenId = central?.sucursalId;
+    }
+
+    if (!origenId) {
+      return [];
+    }
+
+    // 1. Obtener lotes con existencia disponible y vigentes (criterio FEFO) en la sucursal de origen
+    const qb = this.loteRepo
+      .createQueryBuilder('lote')
+      .innerJoinAndSelect(
+        'lote.inventarios',
+        'inventario',
+        'inventario.sucursalId = :origenId AND inventario.cantidadDisponible > 0',
+        { origenId },
+      )
+      .innerJoinAndSelect('lote.producto', 'producto')
+      .leftJoinAndSelect('producto.categoria', 'categoria')
+      .leftJoinAndSelect('producto.unidadMedida', 'unidadMedida')
+      .where('lote.fechaVencimiento >= TRUNC(SYSDATE)')
+      .orderBy('lote.fechaVencimiento', 'ASC');
+
+    const lotes = await qb.getMany();
+
+    const productosConLoteIds = new Set<number>();
+
+    const lotesDisponibles = lotes.map((lote) => {
+      const inv = (lote.inventarios ?? []).find(
+        (i) => Number(i.sucursalId) === Number(origenId),
+      );
+      const stockDisponible = inv ? Number(inv.cantidadDisponible) : 0;
+      if (lote.producto?.productoId) {
+        productosConLoteIds.add(lote.producto.productoId);
+      }
+      return {
+        loteId: lote.loteId,
+        numeroLote: lote.numeroLote,
+        fechaVencimiento: lote.fechaVencimiento,
+        stockDisponible,
+        agotado: stockDisponible <= 0,
+        producto: {
+          productoId: lote.producto?.productoId,
+          nombre: lote.producto?.nombre,
+          codigoProducto: lote.producto?.codigoProducto,
+          principioActivo: lote.producto?.principioActivo,
+          categoria: lote.producto?.categoria?.nombre,
+          unidadMedida: lote.producto?.unidadMedida?.nombre,
+        },
+      };
+    });
+
+    // 2. Obtener productos activos que NO tienen lotes disponibles con stock en Bodega Central (Agotados)
+    const productoRepo = this.dataSource.getRepository(Producto);
+    const todosProductos = await productoRepo
+      .createQueryBuilder('p')
+      .leftJoinAndSelect('p.categoria', 'categoria')
+      .leftJoinAndSelect('p.unidadMedida', 'unidadMedida')
+      .where('p.estado = :est', { est: 'ACTIVO' })
+      .orderBy('p.nombre', 'ASC')
+      .getMany();
+
+    const productosAgotados = todosProductos
+      .filter((p) => !productosConLoteIds.has(p.productoId))
+      .map((p) => ({
+        loteId: 0,
+        numeroLote: 'SIN LOTE',
+        fechaVencimiento: null as any,
+        stockDisponible: 0,
+        agotado: true,
+        producto: {
+          productoId: p.productoId,
+          nombre: p.nombre,
+          codigoProducto: p.codigoProducto,
+          principioActivo: p.principioActivo,
+          categoria: p.categoria?.nombre,
+          unidadMedida: p.unidadMedida?.nombre,
+        },
+      }));
+
+    // Retornar primero los disponibles ordenados por FEFO (menor tiempo para vencer primero), y luego los agotados
+    return [...lotesDisponibles, ...productosAgotados];
+  }
+
+  async obtenerConteoPendientes(user?: AuthenticatedUser) {
+    const esAdmin = user?.rolNombre?.toUpperCase() === 'ADMIN';
+    const sucursalId = user?.sucursalId;
+
+    let esBodegaCentral = false;
+    if (sucursalId) {
+      const suc = await this.sucursalRepo.findOne({
+        where: { sucursalId },
+      });
+      esBodegaCentral = Boolean(
+        suc?.tipoSucursal === 'BODEGA_CENTRAL' ||
+        suc?.nombre?.toLowerCase().includes('central'),
+      );
+    }
+
+    const pendientesDespacho = await this.transferenciaRepo.count({
+      where: { estado: 'SOLICITADA' },
+    });
+
+    let pendientesRecepcion = 0;
+    if (sucursalId && !esBodegaCentral && !esAdmin) {
+      pendientesRecepcion = await this.transferenciaRepo.count({
+        where: {
+          estado: 'EN_TRANSITO',
+          sucursalDestino: { sucursalId },
+        },
+      });
+    }
+
+    let conteoBadge = 0;
+    let tipoBadge: 'DESPACHO' | 'RECEPCION' | 'NINGUNO' = 'NINGUNO';
+
+    if (esAdmin || esBodegaCentral) {
+      conteoBadge = pendientesDespacho;
+      tipoBadge = 'DESPACHO';
+    } else {
+      conteoBadge = pendientesRecepcion;
+      tipoBadge = 'RECEPCION';
+    }
+
+    // Datos del último despacho en tránsito para la farmacia solicitante (únicamente para sucursales receptoras)
+    let ultimoDespacho: {
+      transferenciaId: number;
+      origenNombre?: string;
+      fechaEnvio?: Date | string | null;
+    } | null = null;
+
+    if (!esAdmin && !esBodegaCentral && sucursalId && pendientesRecepcion > 0) {
+      const ultimo = await this.transferenciaRepo.findOne({
+        where: {
+          estado: 'EN_TRANSITO',
+          sucursalDestino: { sucursalId },
+        },
+        order: { fechaEnvio: 'DESC', transferenciaId: 'DESC' },
+        relations: { sucursalOrigen: true },
+      });
+      if (ultimo) {
+        ultimoDespacho = {
+          transferenciaId: ultimo.transferenciaId,
+          origenNombre: ultimo.sucursalOrigen?.nombre,
+          fechaEnvio: ultimo.fechaEnvio,
+        };
+      }
+    }
+
+    // Datos de la última solicitud pendiente para Bodega Central / Admin
+    let ultimaSolicitud: {
+      transferenciaId: number;
+      origenNombre?: string;
+      fechaSolicitud?: Date | string | null;
+    } | null = null;
+
+    if ((esAdmin || esBodegaCentral) && pendientesDespacho > 0) {
+      const ultima = await this.transferenciaRepo.findOne({
+        where: { estado: 'SOLICITADA' },
+        order: { fechaSolicitud: 'DESC', transferenciaId: 'DESC' },
+        relations: { sucursalOrigen: true },
+      });
+      if (ultima) {
+        ultimaSolicitud = {
+          transferenciaId: ultima.transferenciaId,
+          origenNombre: ultima.sucursalOrigen?.nombre,
+          fechaSolicitud: ultima.fechaSolicitud,
+        };
+      }
+    }
+
+    // Datos de la última cancelación o rechazo para Bodega Central / Admin
+    let ultimaCancelacion: {
+      transferenciaId: number;
+      destinoNombre?: string;
+      observacion?: string | null;
+      fecha?: Date | string | null;
+    } | null = null;
+
+    if (esAdmin || esBodegaCentral) {
+      const ultimaCanc = await this.transferenciaRepo.findOne({
+        where: { estado: 'CANCELADA' },
+        order: { transferenciaId: 'DESC' },
+        relations: { sucursalDestino: true },
+      });
+      if (ultimaCanc) {
+        ultimaCancelacion = {
+          transferenciaId: ultimaCanc.transferenciaId,
+          destinoNombre: ultimaCanc.sucursalDestino?.nombre,
+          observacion: ultimaCanc.observacion,
+          fecha: ultimaCanc.fechaRecepcion || ultimaCanc.fechaSolicitud,
+        };
+      }
+    }
+
+    return {
+      pendientesDespacho,
+      pendientesRecepcion,
+      conteoBadge,
+      tipoBadge,
+      ultimoDespacho,
+      ultimaSolicitud,
+      ultimaCancelacion,
+    };
   }
 }

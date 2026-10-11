@@ -24,7 +24,9 @@
     "migration:create": "ts-node ./node_modules/typeorm/cli.js migration:create",
     "migration:run": "npm run typeorm -- migration:run",
     "migration:revert": "npm run typeorm -- migration:revert",
-    "db:clean": "ts-node -r tsconfig-paths/register src/database/reset-db.ts"
+    "db:clean": "ts-node -r tsconfig-paths/register src/database/reset-db.ts",
+    "seed:oficial": "ts-node -r tsconfig-paths/register src/database/seed-oficial.ts",
+    "reset-admin": "ts-node -r tsconfig-paths/register src/database/reset-admin.ts"
   },
   "dependencies": {
     "@nestjs/common": "^12.0.1",

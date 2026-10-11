@@ -68,4 +68,8 @@ export class CreateUsuarioDto {
   @IsNotEmpty({ message: 'La sucursal asignada es obligatoria.' })
   @IsNumber({}, { message: 'El sucursalId debe ser numérico.' })
   sucursalId: number;
+
+  @IsOptional()
+  @IsNumber({}, { message: 'El empleadoId debe ser numérico.' })
+  empleadoId?: number;
 }

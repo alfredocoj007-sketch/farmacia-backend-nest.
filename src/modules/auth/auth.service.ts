@@ -81,6 +81,7 @@ export class AuthService {
           usuarioBd: 'FARMACIA_APP',
           ipCliente: '127.0.0.1',
           host: 'farma-client',
+          fechaEvento: new Date(),
         }),
       );
     } catch (error) {
@@ -125,6 +126,7 @@ export class AuthService {
           usuarioBd: 'FARMACIA_APP',
           ipCliente: '127.0.0.1',
           host: 'farma-client',
+          fechaEvento: new Date(),
         }),
       );
     } catch (e) {

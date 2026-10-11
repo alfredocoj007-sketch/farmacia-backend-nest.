@@ -17,8 +17,8 @@ export class CreateSucursalDto {
 
   @IsNotEmpty({ message: 'El tipo de punto de venta es obligatorio.' })
   @IsString()
-  @IsEnum(['FARMACIA', 'MALL_STAND', 'GAS_STAND', 'BODEGA_MATRIZ'], {
-    message: 'Tipo de sucursal no válido (FARMACIA, MALL_STAND, GAS_STAND, BODEGA_MATRIZ).',
+  @IsEnum(['FARMACIA', 'MALL_STAND', 'GAS_STAND', 'BODEGA_CENTRAL', 'BODEGA_MATRIZ', 'STAND'], {
+    message: 'Tipo de sucursal no válido (FARMACIA, MALL_STAND, GAS_STAND, BODEGA_CENTRAL).',
   })
   tipoSucursal: string;
 

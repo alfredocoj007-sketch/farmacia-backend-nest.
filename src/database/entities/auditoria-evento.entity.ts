@@ -27,7 +27,7 @@ export class AuditoriaEvento {
   @Column("timestamp", {
     name: "FECHA_EVENTO",
     scale: 6,
-    default: () => "SYSTIMESTAMP",
+    default: () => "CURRENT_TIMESTAMP",
   })
   fechaEvento: Date;
 

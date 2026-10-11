@@ -11,6 +11,10 @@ import { Producto } from '../../database/entities/producto.entity';
 import { Inventario } from '../../database/entities/inventario.entity';
 import { Lote } from '../../database/entities/lote.entity';
 import { Municipio } from '../../database/entities/municipio.entity';
+import { MovimientoInventario } from '../../database/entities/movimiento-inventario.entity';
+import { SesionCaja } from '../../database/entities/sesion-caja.entity';
+import { MovimientoCaja } from '../../database/entities/movimiento-caja.entity';
+import { Empleado } from '../../database/entities/empleado.entity';
 import {
   CreatePedidoCallCenterDto,
   ItemPedidoCallCenterDto,
@@ -18,6 +22,8 @@ import {
 import { CambiarEstadoPedidoDto } from './dto/cambiar-estado-pedido.dto';
 import { QueryPedidosDto } from './dto/query-pedidos.dto';
 import { ConsultarDisponibilidadDto } from './dto/consultar-disponibilidad.dto';
+import { AuditoriaService } from '../auditoria/auditoria.service';
+import type { AuthenticatedUser } from '../auth/strategies/jwt.strategy';
 
 @Injectable()
 export class PedidosService {
@@ -42,6 +48,15 @@ export class PedidosService {
     private readonly inventarioRepo: Repository<Inventario>,
     @InjectRepository(Lote)
     private readonly loteRepo: Repository<Lote>,
+    @InjectRepository(MovimientoInventario)
+    private readonly movimientoInventarioRepo: Repository<MovimientoInventario>,
+    @InjectRepository(SesionCaja)
+    private readonly sesionCajaRepo: Repository<SesionCaja>,
+    @InjectRepository(MovimientoCaja)
+    private readonly movimientoCajaRepo: Repository<MovimientoCaja>,
+    @InjectRepository(Empleado)
+    private readonly empleadoRepo: Repository<Empleado>,
+    private readonly auditoriaService: AuditoriaService,
   ) {}
 
   /**
@@ -112,6 +127,97 @@ export class PedidosService {
   }
 
   /**
+   * Catálogo inteligente de medicamentos para Call Center con stock multisede
+   * y cálculo en tiempo real de lote prioritario bajo criterio FEFO (First Expire, First Out).
+   */
+  async obtenerMedicamentosDisponiblesCallCenter() {
+    const productos = await this.productoRepo
+      .createQueryBuilder('p')
+      .leftJoinAndSelect('p.categoria', 'cat')
+      .leftJoinAndSelect('p.laboratorio', 'lab')
+      .leftJoinAndSelect('p.unidadMedida', 'um')
+      .where('p.estado = :est', { est: 'ACTIVO' })
+      .orderBy('p.nombre', 'ASC')
+      .getMany();
+
+    // Consultar todos los inventarios disponibles no vencidos (criterio FEFO estricto)
+    const inventarios = await this.inventarioRepo
+      .createQueryBuilder('inv')
+      .innerJoinAndSelect('inv.lote', 'lote')
+      .innerJoinAndSelect('inv.sucursal', 'sucursal')
+      .where('inv.cantidadDisponible > 0')
+      .andWhere('lote.fechaVencimiento >= TRUNC(SYSDATE)')
+      .orderBy('lote.fechaVencimiento', 'ASC')
+      .getMany();
+
+    const hoy = new Date();
+
+    return productos.map((prod) => {
+      const invsProd = inventarios.filter((i) => i.lote.productoId === prod.productoId);
+
+      const stockTotal = invsProd.reduce(
+        (sum, i) => sum + Number(i.cantidadDisponible),
+        0,
+      );
+
+      const primerInvFefo = invsProd.length > 0 ? invsProd[0] : null;
+
+      let fefolote = null;
+      if (primerInvFefo) {
+        const vtoDate = new Date(primerInvFefo.lote.fechaVencimiento);
+        const diasParaVencer = Math.max(
+          0,
+          Math.ceil((vtoDate.getTime() - hoy.getTime()) / (1000 * 60 * 60 * 24)),
+        );
+
+        fefolote = {
+          loteId: primerInvFefo.lote.loteId,
+          numeroLote: primerInvFefo.lote.numeroLote,
+          fechaVencimiento: primerInvFefo.lote.fechaVencimiento,
+          diasParaVencer,
+          sucursalNombre: primerInvFefo.sucursal?.nombre || 'Farmacia',
+          cantidadDisponibleEnLote: Number(primerInvFefo.cantidadDisponible),
+        };
+      }
+
+      // Desglose por sucursales con stock
+      const sucursalesMap = new Map<number, { sucursalId: number; nombre: string; stock: number }>();
+      for (const inv of invsProd) {
+        const actual = sucursalesMap.get(inv.sucursalId) || {
+          sucursalId: inv.sucursalId,
+          nombre: inv.sucursal?.nombre || `Sucursal #${inv.sucursalId}`,
+          stock: 0,
+        };
+        actual.stock += Number(inv.cantidadDisponible);
+        sucursalesMap.set(inv.sucursalId, actual);
+      }
+
+      return {
+        productoId: prod.productoId,
+        codigoProducto: prod.codigoProducto,
+        nombre: prod.nombre,
+        principioActivo: prod.principioActivo,
+        presentacion: prod.presentacion,
+        concentracion: prod.concentracion,
+        unidadMedida: prod.unidadMedida?.nombre || null,
+        unidadMedidaAbrev: prod.unidadMedida?.abreviatura || null,
+        precioVenta: Number(prod.precioVenta),
+        requiereReceta: prod.requiereReceta === 'S',
+        categoria: prod.categoria
+          ? { categoriaId: prod.categoria.categoriaId, nombre: prod.categoria.nombre }
+          : null,
+        laboratorio: prod.laboratorio
+          ? { laboratorioId: prod.laboratorio.laboratorioId, nombre: prod.laboratorio.nombre }
+          : null,
+        stockTotal,
+        agotado: stockTotal <= 0,
+        fefoLote: fefolote,
+        sucursalesConStock: Array.from(sucursalesMap.values()),
+      };
+    });
+  }
+
+  /**
    * Consulta en tiempo real de disponibilidad por farmacia (Mall, Stand Gasolinera, Central).
    * Determina qué sucursal puede despachar completo para evitar entregas tardías.
    */
@@ -131,13 +237,15 @@ export class PedidosService {
         const prod = await this.productoRepo.findOne({ where: { productoId: item.productoId } });
         if (!prod) continue;
 
-        // Sumar existencias disponibles en inventario de esta sucursal para este producto
+        // Sumar existencias disponibles bajo criterio FEFO (no vencidas)
         const inventarios = await this.inventarioRepo
           .createQueryBuilder('inv')
           .innerJoin('inv.lote', 'lote')
           .where('inv.sucursalId = :sucId', { sucId: suc.sucursalId })
           .andWhere('lote.productoId = :prodId', { prodId: item.productoId })
           .andWhere('inv.cantidadDisponible > 0')
+          .andWhere('lote.fechaVencimiento >= TRUNC(SYSDATE)')
+          .orderBy('lote.fechaVencimiento', 'ASC')
           .getMany();
 
         const stockDisponible = inventarios.reduce(
@@ -175,8 +283,23 @@ export class PedidosService {
       });
     }
 
-    // Ordenar primero las sucursales que pueden entregar 100% de la orden
-    return resultados.sort((a, b) => (b.puedeEntregarCompleto ? 1 : 0) - (a.puedeEntregarCompleto ? 1 : 0));
+    // Comprobar estado de caja de cada sucursal
+    for (const res of resultados) {
+      const sesion = await this.sesionCajaRepo
+        .createQueryBuilder('sesion')
+        .innerJoin('sesion.caja', 'caja')
+        .where('sesion.estado = :estado', { estado: 'ABIERTA' })
+        .andWhere('caja.sucursalId = :sucId', { sucId: res.sucursalId })
+        .getOne();
+      (res as any).tieneCajaAbierta = !!sesion;
+    }
+
+    // Ordenar primero las sucursales con caja abierta y que pueden entregar completo
+    return resultados.sort((a: any, b: any) => {
+      const scoreB = (b.puedeEntregarCompleto ? 2 : 0) + (b.tieneCajaAbierta ? 1 : 0);
+      const scoreA = (a.puedeEntregarCompleto ? 2 : 0) + (a.tieneCajaAbierta ? 1 : 0);
+      return scoreB - scoreA;
+    });
   }
 
   /**
@@ -192,8 +315,14 @@ export class PedidosService {
     if (dto.clienteId) {
       cliente = await this.clienteRepo.findOne({ where: { clienteId: dto.clienteId } });
     } else if (dto.nuevoCliente) {
+      const telLimpio = (dto.nuevoCliente.telefono || '').replace(/\D/g, '');
+      if (telLimpio.length !== 8) {
+        throw new BadRequestException('El número de teléfono debe tener exactamente 8 dígitos numéricos (sin letras ni símbolos).');
+      }
+      dto.nuevoCliente.telefono = telLimpio;
+
       const existente = await this.clienteRepo.findOne({
-        where: { telefono: dto.nuevoCliente.telefono.trim() },
+        where: { telefono: telLimpio },
       });
       if (existente) {
         existente.nombre = dto.nuevoCliente.nombre.trim();
@@ -209,7 +338,7 @@ export class PedidosService {
         const nuevo = this.clienteRepo.create({
           nombre: dto.nuevoCliente.nombre.trim(),
           apellido: dto.nuevoCliente.apellido?.trim() || null,
-          telefono: dto.nuevoCliente.telefono.trim(),
+          telefono: telLimpio,
           direccion: dto.nuevoCliente.direccion.trim(),
           referenciaDireccion: dto.nuevoCliente.referenciaDireccion?.trim() || null,
           email: dto.nuevoCliente.email?.trim() || null,
@@ -230,6 +359,20 @@ export class PedidosService {
     });
     if (!sucursal) {
       throw new NotFoundException(`Sucursal de preparación #${dto.sucursalPreparacionId} no encontrada o inactiva.`);
+    }
+
+    // 2.1 Validar que la sucursal preparadora tenga al menos un turno de caja abierto
+    const sesionCajaActiva = await this.sesionCajaRepo
+      .createQueryBuilder('sesion')
+      .innerJoin('sesion.caja', 'caja')
+      .where('sesion.estado = :estado', { estado: 'ABIERTA' })
+      .andWhere('caja.sucursalId = :sucId', { sucId: sucursal.sucursalId })
+      .getOne();
+
+    if (!sesionCajaActiva) {
+      throw new BadRequestException(
+        `No se puede procesar el pedido: La sucursal "${sucursal.nombre}" no tiene ningún turno de caja abierto en este momento. Es obligatorio que la sucursal tenga una caja abierta para operar ventas y recepcionar pagos.`,
+      );
     }
 
     // 3. Validar Método de Pago
@@ -257,28 +400,36 @@ export class PedidosService {
         throw new NotFoundException(`Medicamento #${item.productoId} no encontrado.`);
       }
 
-      // Buscar lote disponible bajo FEFO en la sucursal asignada
+      // Buscar lote disponible bajo FEFO en la sucursal asignada (estrictamente no vencido)
       const inventarios = await this.inventarioRepo
         .createQueryBuilder('inv')
         .innerJoinAndSelect('inv.lote', 'lote')
         .where('inv.sucursalId = :sucId', { sucId: sucursal.sucursalId })
         .andWhere('lote.productoId = :prodId', { prodId: producto.productoId })
         .andWhere('inv.cantidadDisponible >= :qty', { qty: item.cantidad })
+        .andWhere('lote.fechaVencimiento >= TRUNC(SYSDATE)')
         .orderBy('lote.fechaVencimiento', 'ASC')
         .getMany();
 
       const invSeleccionado = inventarios.length > 0 ? inventarios[0] : null;
+
+      if (!invSeleccionado) {
+        throw new BadRequestException(
+          `Stock insuficiente bajo protocolo FEFO para "${producto.nombre}" en la farmacia seleccionada (${sucursal.nombre}). Cantidad solicitada: ${item.cantidad}.`,
+        );
+      }
+
       const precioUnitario = Number(producto.precioVenta);
       const subtotal = Number((precioUnitario * item.cantidad).toFixed(2));
       totalPedido += subtotal;
 
       detallesAguardar.push({
         producto,
-        lote: invSeleccionado?.lote || null,
+        lote: invSeleccionado.lote,
         cantidad: item.cantidad,
         precioUnitario,
         subtotal,
-        inventarioAfectar: invSeleccionado || undefined,
+        inventarioAfectar: invSeleccionado,
       });
     }
 
@@ -335,6 +486,18 @@ export class PedidosService {
     this.logger.log(
       `Pedido Call Center #${pedidoGuardado.pedidoId} creado exitosamente para ${cliente.nombre}. Preparación: ${sucursal.nombre}. Total: Q${totalPedido}`,
     );
+
+    try {
+      await this.auditoriaService.registrarEvento({
+        modulo: 'PEDIDOS',
+        operacion: 'INSERT',
+        tablaAfectada: 'PEDIDO',
+        registroId: pedidoGuardado.pedidoId,
+        descripcion: `Creación de pedido telefónico / Call Center #PED-${pedidoGuardado.pedidoId} para cliente "${cliente.nombre} ${cliente.apellido || ''}". Preparación: ${sucursal.nombre}. Total: Q${totalPedido}.`.trim(),
+        clientIdentifier: usuario?.username || 'callcenter',
+        usuarioBd: usuario?.username || 'FARMACIA_APP',
+      });
+    } catch (e) {}
 
     return this.obtenerPedidoPorId(pedidoGuardado.pedidoId);
   }
@@ -419,6 +582,7 @@ export class PedidosService {
         pedidoDetalleId: d.pedidoDetalleId,
         productoNombre: d.producto?.nombre,
         principioActivo: d.producto?.principioActivo,
+        requiereReceta: d.producto?.requiereReceta,
         cantidad: Number(d.cantidad),
         precioUnitario: Number(d.precioUnitario),
         subtotal: Number(d.subtotal),
@@ -430,19 +594,17 @@ export class PedidosService {
    * Obtiene la ficha completa de un pedido y su trazabilidad logística de entrega.
    */
   async obtenerPedidoPorId(pedidoId: number) {
-    const p = await this.pedidoRepo.findOne({
-      where: { pedidoId },
-      relations: {
-        cliente: true,
-        sucursalPreparacion: true,
-        metodoPago: true,
-        entrega: true,
-        pedidoDetalles: {
-          producto: true,
-          lote: true,
-        },
-      },
-    });
+    const p = await this.pedidoRepo
+      .createQueryBuilder('p')
+      .leftJoinAndSelect('p.cliente', 'cliente')
+      .leftJoinAndSelect('p.sucursalPreparacion', 'sucursalPreparacion')
+      .leftJoinAndSelect('p.metodoPago', 'metodoPago')
+      .leftJoinAndSelect('p.entrega', 'entrega')
+      .leftJoinAndSelect('p.pedidoDetalles', 'detalles')
+      .leftJoinAndSelect('detalles.producto', 'producto')
+      .leftJoinAndSelect('detalles.lote', 'lote')
+      .where('p.pedidoId = :pedidoId', { pedidoId })
+      .getOne();
 
     if (!p) {
       throw new NotFoundException(`Pedido #${pedidoId} no encontrado.`);
@@ -505,10 +667,18 @@ export class PedidosService {
   /**
    * Actualiza el estado del pedido y sincroniza la guía de entrega a domicilio.
    */
-  async actualizarEstadoPedido(pedidoId: number, dto: CambiarEstadoPedidoDto) {
+  async actualizarEstadoPedido(pedidoId: number, dto: CambiarEstadoPedidoDto, user?: AuthenticatedUser) {
     const pedido = await this.pedidoRepo.findOne({
       where: { pedidoId },
-      relations: { entrega: true, sucursalPreparacion: true },
+      relations: {
+        entrega: true,
+        sucursalPreparacion: true,
+        metodoPago: true,
+        pedidoDetalles: {
+          producto: true,
+          lote: true,
+        },
+      },
     });
     if (!pedido) {
       throw new NotFoundException(`Pedido #${pedidoId} no encontrado.`);
@@ -532,7 +702,7 @@ export class PedidosService {
         pedido.entrega.estado = 'EN_RUTA';
         pedido.entrega.fechaSalida = ahora;
       }
-    } else if (dto.estado === 'ENTREGADO') {
+    } else if (dto.estado === 'ENTREGADO' && estadoAnterior !== 'ENTREGADO') {
       if (pedido.entrega) {
         pedido.entrega.estado = 'ENTREGADA';
         pedido.entrega.fechaEntrega = ahora;
@@ -540,9 +710,112 @@ export class PedidosService {
           pedido.entrega.personaRecibe = dto.personaRecibe.trim();
         }
       }
-    } else if (dto.estado === 'CANCELADO') {
+
+      // 1. Limpiar existencias reservadas y asentar salida oficial en el Kardex
+      if (pedido.pedidoDetalles && pedido.sucursalPreparacion) {
+        for (const det of pedido.pedidoDetalles) {
+          if (det.lote) {
+            const inv = await this.inventarioRepo.findOne({
+              where: {
+                sucursalId: pedido.sucursalPreparacion.sucursalId,
+                loteId: det.lote.loteId,
+              },
+            });
+            if (inv) {
+              const qty = Number(det.cantidad || 0);
+              // Descontar la cantidad que estaba reservada
+              inv.cantidadReservada = Math.max(0, Number(inv.cantidadReservada || 0) - qty);
+              inv.fechaActualizacion = ahora;
+              await this.inventarioRepo.save(inv);
+
+              // Registrar movimiento oficial de VENTA en el Kardex
+              const movInv = this.movimientoInventarioRepo.create({
+                inventario: inv,
+                tipoMovimiento: 'VENTA',
+                referenciaTipo: 'PEDIDO',
+                referenciaId: pedido.pedidoId,
+                cantidad: qty,
+                cantidadAnterior: Number(inv.cantidadDisponible) + qty,
+                cantidadNueva: Number(inv.cantidadDisponible),
+                observacion: `Venta Call Center / Entrega a domicilio finalizada Ticket #PED-${pedido.pedidoId}`,
+                fechaMovimiento: ahora,
+              });
+              await this.movimientoInventarioRepo.save(movInv);
+            }
+          }
+        }
+      }
+
+      // 2. Liquidación en Caja: Ingresar el cobro en el turno de caja abierto del cajero/sucursal
+      if (pedido.sucursalPreparacion) {
+        const sesionActiva = await this.sesionCajaRepo
+          .createQueryBuilder('sesion')
+          .innerJoinAndSelect('sesion.caja', 'caja')
+          .leftJoinAndSelect('sesion.empleadoApertura', 'empApertura')
+          .where('sesion.estado = :estado', { estado: 'ABIERTA' })
+          .andWhere('caja.sucursalId = :sucId', { sucId: pedido.sucursalPreparacion.sucursalId })
+          .orderBy('sesion.fechaApertura', 'DESC')
+          .getOne();
+
+        if (sesionActiva) {
+          let empleadoCobro = null;
+          if (user?.empleadoId) {
+            empleadoCobro = await this.empleadoRepo.findOne({
+              where: { empleadoId: user.empleadoId },
+            });
+          }
+          if (!empleadoCobro) {
+            empleadoCobro = sesionActiva.empleadoApertura;
+          }
+
+          const movCaja = this.movimientoCajaRepo.create({
+            sesionCaja: sesionActiva,
+            empleado: empleadoCobro,
+            metodoPago: pedido.metodoPago || undefined,
+            tipoMovimiento: 'INGRESO',
+            monto: Number(pedido.total),
+            descripcion: `Liquidación Pedido Call Center #PED-${pedido.pedidoId} (${pedido.metodoPago?.nombre || 'Efectivo'})`,
+            referenciaTipo: 'PEDIDO',
+            referenciaId: pedido.pedidoId,
+            fechaMovimiento: ahora,
+          });
+          await this.movimientoCajaRepo.save(movCaja);
+
+          sesionActiva.totalIngresos = Number(sesionActiva.totalIngresos || 0) + Number(pedido.total);
+          await this.sesionCajaRepo.save(sesionActiva);
+
+          this.logger.log(
+            `Liquidación de Pedido Call Center #${pedido.pedidoId} (Q${pedido.total}) ingresada a Caja ${sesionActiva.caja.codigoCaja} (Sesión #${sesionActiva.sesionCajaId})`,
+          );
+        } else {
+          throw new BadRequestException(
+            `No se puede liquidar el pedido: La sucursal "${pedido.sucursalPreparacion.nombre}" no tiene ningún turno de caja abierto para registrar el ingreso de Q${Number(pedido.total).toFixed(2)}. Debe abrirse una caja en la sucursal antes de liquidar el cobro.`,
+          );
+        }
+      }
+    } else if (dto.estado === 'CANCELADO' && estadoAnterior !== 'CANCELADO') {
       if (pedido.entrega) {
-        pedido.entrega.estado = 'FALLIDA';
+        pedido.entrega.estado = 'CANCELADA';
+      }
+      // Revertir existencias reservadas a disponibles en la sucursal preparadora
+      if (pedido.pedidoDetalles && pedido.sucursalPreparacion) {
+        for (const det of pedido.pedidoDetalles) {
+          if (det.lote) {
+            const inv = await this.inventarioRepo.findOne({
+              where: {
+                sucursalId: pedido.sucursalPreparacion.sucursalId,
+                loteId: det.lote.loteId,
+              },
+            });
+            if (inv) {
+              const qty = Number(det.cantidad || 0);
+              inv.cantidadReservada = Math.max(0, Number(inv.cantidadReservada || 0) - qty);
+              inv.cantidadDisponible = Number(inv.cantidadDisponible || 0) + qty;
+              inv.fechaActualizacion = new Date();
+              await this.inventarioRepo.save(inv);
+            }
+          }
+        }
       }
     }
 
@@ -552,18 +825,37 @@ export class PedidosService {
     await this.pedidoRepo.save(pedido);
 
     this.logger.log(`Pedido #${pedido.pedidoId} cambió estado de ${estadoAnterior} a ${dto.estado}`);
+
+    try {
+      await this.auditoriaService.registrarEvento({
+        modulo: 'PEDIDOS',
+        operacion: dto.estado === 'CANCELADO' ? 'DELETE' : 'UPDATE',
+        tablaAfectada: 'PEDIDO',
+        registroId: pedido.pedidoId,
+        descripcion: `Pedido Call Center #PED-${pedido.pedidoId} cambió estado: ${estadoAnterior} -> ${dto.estado}.`,
+        clientIdentifier: user?.username || 'operador',
+        usuarioBd: 'FARMACIA_APP',
+      });
+    } catch (e) {}
+
     return this.obtenerPedidoPorId(pedido.pedidoId);
   }
 
   /**
    * Métricas y KPIs en vivo para el Call Center.
    */
-  async obtenerEstadisticasCallCenter() {
+  async obtenerEstadisticasCallCenter(sucursalId?: number) {
     await this.autoSeedClientesSiEstaVacio();
 
-    const pedidos = await this.pedidoRepo.find({
-      relations: { entrega: true },
-    });
+    const findOptions: any = {
+      relations: { entrega: true, sucursalPreparacion: true, cliente: true },
+      order: { pedidoId: 'DESC' },
+    };
+    if (sucursalId) {
+      findOptions.where = { sucursalPreparacion: { sucursalId } };
+    }
+
+    const pedidos = await this.pedidoRepo.find(findOptions);
 
     let totalPedidos = pedidos.length;
     let recibidos = 0;
@@ -582,6 +874,10 @@ export class PedidosService {
       else if (p.estado === 'CANCELADO') cancelados++;
     }
 
+    const ultimoPorDespachar = pedidos.find(
+      (p) => p.estado === 'RECIBIDO' || p.estado === 'EN_PREPARACION',
+    );
+
     return {
       totalPedidos,
       recibidos,
@@ -590,6 +886,16 @@ export class PedidosService {
       entregados,
       cancelados,
       montoTotal: Number(montoTotal.toFixed(2)),
+      porDespachar: recibidos + enPreparacion,
+      ultimoPedido: ultimoPorDespachar
+        ? {
+            pedidoId: ultimoPorDespachar.pedidoId,
+            estado: ultimoPorDespachar.estado,
+            total: Number(ultimoPorDespachar.total),
+            sucursalNombre: ultimoPorDespachar.sucursalPreparacion?.nombre || 'Sucursal',
+            clienteNombre: ultimoPorDespachar.cliente?.nombre || 'Cliente',
+          }
+        : null,
     };
   }
 }

@@ -16,6 +16,8 @@ import { Roles } from '../auth/decorators/roles.decorator';
 import { CreateSucursalDto } from './dto/create-sucursal.dto';
 import { UpdateSucursalDto } from './dto/update-sucursal.dto';
 import { QuerySucursalesDto } from './dto/query-sucursales.dto';
+import { CreateDepartamentoDto } from './dto/create-departamento.dto';
+import { CreateMunicipioDto } from './dto/create-municipio.dto';
 
 @UseGuards(JwtAuthGuard)
 @Controller('sucursales')
@@ -43,6 +45,20 @@ export class SucursalesController {
   getMunicipios(@Query('departamentoId') departamentoId?: string) {
     const depId = departamentoId ? parseInt(departamentoId, 10) : undefined;
     return this.sucursalesService.getMunicipios(depId);
+  }
+
+  @UseGuards(RolesGuard)
+  @Roles('ADMIN')
+  @Post('departamentos')
+  createDepartamento(@Body() dto: CreateDepartamentoDto) {
+    return this.sucursalesService.createDepartamento(dto);
+  }
+
+  @UseGuards(RolesGuard)
+  @Roles('ADMIN')
+  @Post('municipios')
+  createMunicipio(@Body() dto: CreateMunicipioDto) {
+    return this.sucursalesService.createMunicipio(dto);
   }
 
   @Get(':id')

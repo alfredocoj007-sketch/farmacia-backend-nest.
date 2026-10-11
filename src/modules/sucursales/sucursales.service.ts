@@ -18,6 +18,8 @@ import { AuditoriaEvento } from '../../database/entities/auditoria-evento.entity
 import { CreateSucursalDto } from './dto/create-sucursal.dto';
 import { UpdateSucursalDto } from './dto/update-sucursal.dto';
 import { QuerySucursalesDto } from './dto/query-sucursales.dto';
+import { CreateDepartamentoDto } from './dto/create-departamento.dto';
+import { CreateMunicipioDto } from './dto/create-municipio.dto';
 
 @Injectable()
 export class SucursalesService implements OnModuleInit {
@@ -282,6 +284,7 @@ export class SucursalesService implements OnModuleInit {
           usuarioBd: 'FARMACIA_APP',
           ipCliente: '127.0.0.1',
           host: 'farma-client',
+          fechaEvento: new Date(),
         }),
       );
     } catch (e) {
@@ -345,6 +348,7 @@ export class SucursalesService implements OnModuleInit {
           usuarioBd: 'FARMACIA_APP',
           ipCliente: '127.0.0.1',
           host: 'farma-client',
+          fechaEvento: new Date(),
         }),
       );
     } catch (e) {
@@ -377,6 +381,7 @@ export class SucursalesService implements OnModuleInit {
           usuarioBd: 'FARMACIA_APP',
           ipCliente: '127.0.0.1',
           host: 'farma-client',
+          fechaEvento: new Date(),
         }),
       );
     } catch (e) {
@@ -483,6 +488,87 @@ export class SucursalesService implements OnModuleInit {
       relations: { departamento: true },
       order: { nombre: 'ASC' },
     });
+  }
+
+  /**
+   * Registra un nuevo Departamento y opcionalmente su primer Municipio.
+   */
+  async createDepartamento(dto: CreateDepartamentoDto): Promise<Departamento> {
+    const nombreLimpio = dto.nombre.trim();
+    if (!nombreLimpio) {
+      throw new BadRequestException('El nombre del departamento es obligatorio.');
+    }
+
+    const existe = await this.departamentoRepo
+      .createQueryBuilder('d')
+      .where('LOWER(d.nombre) = :nombre', { nombre: nombreLimpio.toLowerCase() })
+      .getOne();
+
+    if (existe) {
+      throw new BadRequestException(`El departamento "${nombreLimpio}" ya existe en el sistema.`);
+    }
+
+    const dep = await this.departamentoRepo.save(
+      this.departamentoRepo.create({ nombre: nombreLimpio }),
+    );
+
+    if (dto.municipioInicial && dto.municipioInicial.trim()) {
+      const munLimpio = dto.municipioInicial.trim();
+      await this.municipioRepo.save(
+        this.municipioRepo.create({
+          nombre: munLimpio,
+          departamentoId: dep.departamentoId,
+        }),
+      );
+    }
+
+    return this.departamentoRepo.findOne({
+      where: { departamentoId: dep.departamentoId },
+      relations: { municipios: true },
+    }) as Promise<Departamento>;
+  }
+
+  /**
+   * Registra un nuevo Municipio bajo un Departamento existente.
+   */
+  async createMunicipio(dto: CreateMunicipioDto): Promise<Municipio> {
+    const nombreLimpio = dto.nombre.trim();
+    if (!nombreLimpio) {
+      throw new BadRequestException('El nombre del municipio es obligatorio.');
+    }
+
+    const dep = await this.departamentoRepo.findOne({
+      where: { departamentoId: dto.departamentoId },
+    });
+    if (!dep) {
+      throw new NotFoundException(`El departamento con ID ${dto.departamentoId} no existe.`);
+    }
+
+    const existe = await this.municipioRepo
+      .createQueryBuilder('m')
+      .where('m.departamentoId = :depId AND LOWER(m.nombre) = :nombre', {
+        depId: dto.departamentoId,
+        nombre: nombreLimpio.toLowerCase(),
+      })
+      .getOne();
+
+    if (existe) {
+      throw new BadRequestException(
+        `El municipio "${nombreLimpio}" ya existe en el departamento de ${dep.nombre}.`,
+      );
+    }
+
+    const mun = await this.municipioRepo.save(
+      this.municipioRepo.create({
+        nombre: nombreLimpio,
+        departamentoId: dep.departamentoId,
+      }),
+    );
+
+    return this.municipioRepo.findOne({
+      where: { municipioId: mun.municipioId },
+      relations: { departamento: true },
+    }) as Promise<Municipio>;
   }
 
   /**

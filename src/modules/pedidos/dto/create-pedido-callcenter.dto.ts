@@ -7,6 +7,7 @@ import {
   IsNumber,
   IsOptional,
   IsString,
+  Matches,
   Min,
   ValidateNested,
 } from 'class-validator';
@@ -33,6 +34,7 @@ export class NuevoClienteDto {
 
   @IsNotEmpty({ message: 'El teléfono es requerido para contacto' })
   @IsString()
+  @Matches(/^[0-9]{8}$/, { message: 'El teléfono debe contener exactamente 8 dígitos numéricos (sin letras ni caracteres especiales).' })
   telefono: string;
 
   @IsNotEmpty({ message: 'La dirección exacta de entrega es requerida' })

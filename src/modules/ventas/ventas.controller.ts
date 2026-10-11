@@ -71,6 +71,14 @@ export class VentasController {
     return this.ventasService.buscarProductosPos(termino, sucursalId);
   }
 
+  @Get('stock-red/:productoId')
+  @Roles('ADMIN', 'VENDEDOR', 'FARMACEUTICO', 'GERENTE')
+  async obtenerStockRedProducto(
+    @Param('productoId', ParseIntPipe) productoId: number,
+  ) {
+    return this.ventasService.obtenerStockRedProducto(productoId);
+  }
+
   @Get(':id')
   async obtenerVentaPorId(@Param('id', ParseIntPipe) id: number) {
     return this.ventasService.obtenerVentaPorId(id);

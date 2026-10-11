@@ -12,6 +12,8 @@ import { RegistrarMovimientoDto } from './dto/registrar-movimiento.dto';
 import { CerrarSesionDto } from './dto/cerrar-sesion.dto';
 import { CreateCajaDto } from './dto/create-caja.dto';
 
+import { AuditoriaService } from '../auditoria/auditoria.service';
+
 @Injectable()
 export class CajasService {
   private readonly logger = new Logger(CajasService.name);
@@ -29,6 +31,7 @@ export class CajasService {
     private readonly sucursalRepo: Repository<Sucursal>,
     @InjectRepository(Empleado)
     private readonly empleadoRepo: Repository<Empleado>,
+    private readonly auditoriaService: AuditoriaService,
   ) {}
 
   /**
@@ -60,9 +63,32 @@ export class CajasService {
       cajas.map(async (caja) => {
         const sesionActiva = await this.sesionCajaRepo.findOne({
           where: { caja: { cajaId: caja.cajaId }, estado: 'ABIERTA' },
-          relations: { empleadoApertura: true },
+          relations: {
+            empleadoApertura: true,
+            movimientoCajas: true,
+          },
           order: { fechaApertura: 'DESC' },
         });
+
+        let ultimoMovimiento: {
+          fecha: Date;
+          descripcion: string;
+          monto: number;
+          tipo: string;
+        } | null = null;
+
+        if (sesionActiva?.movimientoCajas && sesionActiva.movimientoCajas.length > 0) {
+          const ordenados = [...sesionActiva.movimientoCajas].sort(
+            (a, b) => new Date(b.fechaMovimiento).getTime() - new Date(a.fechaMovimiento).getTime(),
+          );
+          const ult = ordenados[0];
+          ultimoMovimiento = {
+            fecha: ult.fechaMovimiento,
+            descripcion: ult.descripcion || '',
+            monto: Number(ult.monto),
+            tipo: ult.tipoMovimiento,
+          };
+        }
 
         return {
           ...caja,
@@ -74,6 +100,7 @@ export class CajasService {
                 totalEgresos: Number(sesionActiva.totalEgresos),
                 fechaApertura: sesionActiva.fechaApertura,
                 cajeroNombre: `${sesionActiva.empleadoApertura?.nombre ?? ''} ${sesionActiva.empleadoApertura?.apellido ?? ''}`.trim(),
+                ultimoMovimiento,
               }
             : null,
         };
@@ -107,6 +134,7 @@ export class CajasService {
     // Desglose de ingresos y egresos por método de pago
     let ingresosEfectivo = 0;
     let ingresosTarjeta = 0;
+    let ingresosTransferencia = 0;
     let ingresosOtros = 0;
     let egresosEfectivo = 0;
 
@@ -119,6 +147,8 @@ export class CajasService {
           ingresosEfectivo += monto;
         } else if (nombreMetodo.includes('TARJETA')) {
           ingresosTarjeta += monto;
+        } else if (nombreMetodo.includes('TRANSFERENCIA')) {
+          ingresosTransferencia += monto;
         } else {
           ingresosOtros += monto;
         }
@@ -145,6 +175,7 @@ export class CajasService {
       desglose: {
         ingresosEfectivo,
         ingresosTarjeta,
+        ingresosTransferencia,
         ingresosOtros,
         egresosEfectivo,
       },
@@ -199,6 +230,19 @@ export class CajasService {
 
     const sesionGuardada = await this.sesionCajaRepo.save(nuevaSesion);
     this.logger.log(`Turno de caja abierto: Sesión #${sesionGuardada.sesionCajaId} por ${empleado.nombre}`);
+
+    try {
+      await this.auditoriaService.registrarEvento({
+        modulo: 'CAJAS',
+        operacion: 'ARQUEO',
+        tablaAfectada: 'SESION_CAJA',
+        registroId: sesionGuardada.sesionCajaId,
+        descripcion: `Apertura de turno en ${caja.codigoCaja} (${caja.sucursal?.nombre || 'Sucursal'}) con fondo inicial de Q${dto.saldoInicial}. Cajero: ${empleado.nombre} ${empleado.apellido || ''}.`.trim(),
+        clientIdentifier: empleado.nombre,
+        usuarioBd: 'FARMACIA_APP',
+      });
+    } catch (e) {}
+
     return sesionGuardada;
   }
 
@@ -246,6 +290,18 @@ export class CajasService {
       sesion.totalEgresos = Number(sesion.totalEgresos) + Number(dto.monto);
     }
     await this.sesionCajaRepo.save(sesion);
+
+    try {
+      await this.auditoriaService.registrarEvento({
+        modulo: 'CAJAS',
+        operacion: 'ARQUEO',
+        tablaAfectada: 'MOVIMIENTO_CAJA',
+        registroId: movGuardado.movimientoCajaId,
+        descripcion: `Movimiento de caja [${dto.tipoMovimiento}] por Q${dto.monto} (${metodoPago.nombre}) en turno #${sesion.sesionCajaId}. Motivo: ${dto.descripcion || 'Sin concepto'}.`,
+        clientIdentifier: empleado.nombre,
+        usuarioBd: 'FARMACIA_APP',
+      });
+    } catch (e) {}
 
     return movGuardado;
   }
@@ -307,6 +363,21 @@ export class CajasService {
       `Sesión #${sesion.sesionCajaId} CERRADA por ${empleadoCierre.nombre}. Esperado: Q${efectivoEsperado}, Contado: Q${efectivoContado}, Diferencia: Q${diferencia}`,
     );
 
+    const resultadoArqueo = diferencia === 0 ? 'CUADRADA' : diferencia > 0 ? 'SOBRANTE' : 'FALTANTE';
+    const esCritico = diferencia < 0;
+
+    try {
+      await this.auditoriaService.registrarEvento({
+        modulo: 'CAJAS',
+        operacion: esCritico ? 'ARQUEO_FALTANTE' : 'ARQUEO',
+        tablaAfectada: 'SESION_CAJA',
+        registroId: sesionCerrada.sesionCajaId,
+        descripcion: `Cierre de turno y corte en ${sesion.caja?.codigoCaja || 'Caja'}: Esperado Q${efectivoEsperado}, Contado Q${efectivoContado}, Descuadre Q${diferencia} (${resultadoArqueo}). Cajero cierre: ${empleadoCierre.nombre}. ${dto.observacionCierre ? 'Obs: ' + dto.observacionCierre : ''}`.trim(),
+        clientIdentifier: empleadoCierre.nombre,
+        usuarioBd: 'FARMACIA_APP',
+      });
+    } catch (e) {}
+
     return {
       sesionCajaId: sesionCerrada.sesionCajaId,
       estado: sesionCerrada.estado,
@@ -316,7 +387,7 @@ export class CajasService {
       efectivoEsperado,
       efectivoContado,
       diferencia,
-      resultadoArqueo: diferencia === 0 ? 'CUADRADA' : diferencia > 0 ? 'SOBRANTE' : 'FALTANTE',
+      resultadoArqueo,
       observacionCierre: sesionCerrada.observacionCierre,
       fechaCierre: sesionCerrada.fechaCierre,
     };
@@ -398,6 +469,20 @@ export class CajasService {
       estado: 'ACTIVA',
     });
 
-    return this.cajaRepo.save(nueva);
+    const guardada = await this.cajaRepo.save(nueva);
+
+    try {
+      await this.auditoriaService.registrarEvento({
+        modulo: 'CAJAS',
+        operacion: 'INSERT',
+        tablaAfectada: 'CAJA',
+        registroId: guardada.cajaId,
+        descripcion: `Creación de terminal de cobro: "${guardada.codigoCaja}" en sucursal ${sucursal.nombre}.`,
+        clientIdentifier: 'admin',
+        usuarioBd: 'FARMACIA_APP',
+      });
+    } catch (e) {}
+
+    return guardada;
   }
 }

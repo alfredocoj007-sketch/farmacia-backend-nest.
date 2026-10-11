@@ -72,17 +72,28 @@ export class AuditoriaService implements OnModuleInit {
     }
 
     if (query.fechaInicio) {
-      const fInicio = new Date(query.fechaInicio);
+      let fInicio: Date;
+      if (typeof query.fechaInicio === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(query.fechaInicio)) {
+        const [y, m, d] = query.fechaInicio.split('-').map(Number);
+        fInicio = new Date(y, m - 1, d, 0, 0, 0, 0);
+      } else {
+        fInicio = new Date(query.fechaInicio);
+      }
       if (!isNaN(fInicio.getTime())) {
         qb.andWhere('auditoria.fechaEvento >= :fInicio', { fInicio });
       }
     }
 
     if (query.fechaFin) {
-      const fFin = new Date(query.fechaFin);
-      if (!isNaN(fFin.getTime())) {
-        // Asegurar cobertura hasta el final del día si sólo se mandó fecha
+      let fFin: Date;
+      if (typeof query.fechaFin === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(query.fechaFin)) {
+        const [y, m, d] = query.fechaFin.split('-').map(Number);
+        fFin = new Date(y, m - 1, d, 23, 59, 59, 999);
+      } else {
+        fFin = new Date(query.fechaFin);
         fFin.setHours(23, 59, 59, 999);
+      }
+      if (!isNaN(fFin.getTime())) {
         qb.andWhere('auditoria.fechaEvento <= :fFin', { fFin });
       }
     }

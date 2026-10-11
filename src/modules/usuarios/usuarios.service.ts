@@ -107,6 +107,40 @@ export class UsuariosService {
     });
   }
 
+  async listarEmpleadosDisponibles(): Promise<any[]> {
+    const empleados = await this.empleadoRepo
+      .createQueryBuilder('e')
+      .leftJoinAndSelect('e.puesto', 'puesto')
+      .leftJoinAndSelect('e.sucursal', 'sucursal')
+      .leftJoinAndSelect('e.credencial', 'credencial')
+      .leftJoinAndSelect('credencial.rol', 'rol')
+      .where('e.estado = :estado', { estado: 'ACTIVO' })
+      .orderBy('e.nombre', 'ASC')
+      .addOrderBy('e.apellido', 'ASC')
+      .getMany();
+
+    return empleados.map((e) => ({
+      empleadoId: e.empleadoId,
+      nombre: e.nombre,
+      apellido: e.apellido,
+      nombreCompleto: `${e.nombre} ${e.apellido}`.trim(),
+      dpi: e.dpi,
+      telefono: e.telefono,
+      estado: e.estado,
+      puesto: e.puesto ? { puestoId: e.puesto.puestoId, nombre: e.puesto.nombre } : null,
+      sucursal: e.sucursal
+        ? {
+            sucursalId: e.sucursal.sucursalId,
+            nombre: e.sucursal.nombre,
+            tipoSucursal: e.sucursal.tipoSucursal,
+          }
+        : null,
+      tieneUsuario: !!e.credencial,
+      username: e.credencial?.username || null,
+      rolNombre: e.credencial?.rol?.nombre || null,
+    }));
+  }
+
   async create(dto: CreateUsuarioDto, adminUsername = 'admin'): Promise<Credencial> {
     const usernameNormalizado = dto.username.trim().toLowerCase();
 
@@ -152,41 +186,86 @@ export class UsuariosService {
 
     let credencialCreadaId: number;
 
-    // 5. Transacción atómica: Crear Empleado -> Crear Credencial
-    await this.dataSource.transaction(async (manager) => {
-      const nuevoEmpleado = manager.create(Empleado, {
-        nombre: dto.nombre.trim(),
-        apellido: dto.apellido.trim(),
-        telefono: dto.telefono?.trim() || null,
-        dpi: dto.dpi?.trim() || null,
-        salarioActual: 3500.0,
-        fechaIngreso: new Date(),
-        estado: 'ACTIVO',
-        sucursal: sucursal,
-        puesto: puesto || undefined,
+    // 5. Transacción atómica:
+    // Si se proporciona empleadoId: vincular al colaborador existente de Planilla
+    if (dto.empleadoId) {
+      const empExistente = await this.empleadoRepo.findOne({
+        where: { empleadoId: Number(dto.empleadoId) },
+        relations: { credencial: true, sucursal: true, puesto: true },
       });
+      if (!empExistente) {
+        throw new NotFoundException(
+          `El colaborador con ID #${dto.empleadoId} no existe en el sistema.`,
+        );
+      }
+      if (empExistente.credencial) {
+        throw new ConflictException(
+          `El colaborador ${empExistente.nombre} ${empExistente.apellido} ya tiene asignada la cuenta de usuario "${empExistente.credencial.username}".`,
+        );
+      }
 
-      const empleadoGuardado = await manager.save(nuevoEmpleado);
+      await this.dataSource.transaction(async (manager) => {
+        // Sincronizar sucursal si difiere
+        if (dto.sucursalId && empExistente.sucursal?.sucursalId !== Number(dto.sucursalId)) {
+          empExistente.sucursal = sucursal;
+          await manager.save(empExistente);
+        }
+        // Actualizar teléfono si se proporcionó y el empleado no lo tenía
+        if (dto.telefono && !empExistente.telefono) {
+          empExistente.telefono = dto.telefono.trim();
+          await manager.save(empExistente);
+        }
 
-      const nuevaCredencial = manager.create(Credencial, {
-        username: usernameNormalizado,
-        passwordHash,
-        empleadoId: empleadoGuardado.empleadoId,
-        empleado: empleadoGuardado,
-        rol: rol,
-        estado: 'ACTIVO',
-        fechaRegistro: new Date(),
+        const nuevaCredencial = manager.create(Credencial, {
+          username: usernameNormalizado,
+          passwordHash,
+          empleadoId: empExistente.empleadoId,
+          empleado: empExistente,
+          rol: rol,
+          estado: 'ACTIVO',
+          fechaRegistro: new Date(),
+        });
+
+        const credencialGuardada = await manager.save(nuevaCredencial);
+        credencialCreadaId = credencialGuardada.credencialId;
       });
+    } else {
+      // Flujo de creación de colaborador nuevo desde cero
+      await this.dataSource.transaction(async (manager) => {
+        const nuevoEmpleado = manager.create(Empleado, {
+          nombre: dto.nombre.trim(),
+          apellido: dto.apellido.trim(),
+          telefono: dto.telefono?.trim() || null,
+          dpi: dto.dpi?.trim() || null,
+          salarioActual: 3500.0,
+          fechaIngreso: new Date(),
+          estado: 'ACTIVO',
+          sucursal: sucursal,
+          puesto: puesto || undefined,
+        });
 
-      const credencialGuardada = await manager.save(nuevaCredencial);
-      credencialCreadaId = credencialGuardada.credencialId;
-    });
+        const empleadoGuardado = await manager.save(nuevoEmpleado);
+
+        const nuevaCredencial = manager.create(Credencial, {
+          username: usernameNormalizado,
+          passwordHash,
+          empleadoId: empleadoGuardado.empleadoId,
+          empleado: empleadoGuardado,
+          rol: rol,
+          estado: 'ACTIVO',
+          fechaRegistro: new Date(),
+        });
+
+        const credencialGuardada = await manager.save(nuevaCredencial);
+        credencialCreadaId = credencialGuardada.credencialId;
+      });
+    }
 
     // 6. Auditoría
     try {
       await this.auditoriaService.registrarEvento({
         modulo: 'USUARIOS',
-        operacion: 'CREATE',
+        operacion: 'INSERT',
         tablaAfectada: 'CREDENCIAL',
         registroId: credencialCreadaId!,
         descripcion: `Creación de nuevo usuario: ${usernameNormalizado} (Rol: ${rol.nombre}, Sucursal: ${sucursal.nombre})`,
@@ -206,6 +285,68 @@ export class UsuariosService {
     adminUsername = 'admin',
   ): Promise<Credencial> {
     const credencial = await this.findOne(id);
+    const usernameNormalizado = (credencial.username || '').trim().toLowerCase();
+    const esAdminPrincipal = usernameNormalizado === 'admin';
+
+    // Regla 1: Protección absoluta del Administrador Principal ('admin')
+    if (esAdminPrincipal) {
+      if (dto.estado && dto.estado === 'INACTIVO') {
+        throw new BadRequestException(
+          'El usuario Administrador Principal (admin) no puede ser desactivado para garantizar el acceso administrativo al sistema.',
+        );
+      }
+      if (dto.rolId !== undefined && Number(dto.rolId) !== credencial.rol?.rolId) {
+        throw new BadRequestException(
+          'El rol del usuario Administrador Principal (admin) es permanente y no puede ser modificado.',
+        );
+      }
+    }
+
+    // Regla 2: Protección del Último Administrador Activo del Sistema
+    const rolActualEsAdmin = credencial.rol?.nombre?.toUpperCase() === 'ADMIN';
+    const cuentaActualmenteActiva = credencial.estado === 'ACTIVO';
+
+    if (rolActualEsAdmin && cuentaActualmenteActiva) {
+      // Validación al intentar desactivar
+      if (dto.estado === 'INACTIVO') {
+        const adminsActivos = await this.credencialRepo
+          .createQueryBuilder('c')
+          .innerJoin('c.rol', 'r')
+          .where('UPPER(r.nombre) = :nombreRol', { nombreRol: 'ADMIN' })
+          .andWhere('c.estado = :estado', { estado: 'ACTIVO' })
+          .getCount();
+
+        if (adminsActivos <= 1) {
+          throw new BadRequestException(
+            'No es posible desactivar al único Administrador activo del sistema. Debe existir al menos un administrador activo para gestionar usuarios y roles.',
+          );
+        }
+      }
+
+      // Validación al intentar cambiar a un rol no-admin
+      if (dto.rolId !== undefined && Number(dto.rolId) !== credencial.rol?.rolId) {
+        const nuevoRol = await this.rolRepo.findOne({
+          where: { rolId: Number(dto.rolId) },
+        });
+        if (!nuevoRol) {
+          throw new NotFoundException(`El rol #${dto.rolId} no existe.`);
+        }
+        if (nuevoRol.nombre.toUpperCase() !== 'ADMIN') {
+          const adminsActivos = await this.credencialRepo
+            .createQueryBuilder('c')
+            .innerJoin('c.rol', 'r')
+            .where('UPPER(r.nombre) = :nombreRol', { nombreRol: 'ADMIN' })
+            .andWhere('c.estado = :estado', { estado: 'ACTIVO' })
+            .getCount();
+
+          if (adminsActivos <= 1) {
+            throw new BadRequestException(
+              'No es posible cambiar el rol del único Administrador activo del sistema a un rol diferente. Debe existir al menos un administrador activo.',
+            );
+          }
+        }
+      }
+    }
 
     await this.dataSource.transaction(async (manager) => {
       // 1. Actualizar empleado si aplica

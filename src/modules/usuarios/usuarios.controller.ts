@@ -34,6 +34,11 @@ export class UsuariosController {
     return this.usuariosService.listarRoles();
   }
 
+  @Get('empleados-disponibles')
+  listarEmpleadosDisponibles() {
+    return this.usuariosService.listarEmpleadosDisponibles();
+  }
+
   @Get(':id')
   findOne(@Param('id', ParseIntPipe) id: number) {
     return this.usuariosService.findOne(id);

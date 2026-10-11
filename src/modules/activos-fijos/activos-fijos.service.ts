@@ -10,6 +10,9 @@ import { TrasladarActivoDto } from './dto/trasladar-activo.dto';
 import { MantenimientoActivoDto } from './dto/mantenimiento-activo.dto';
 import { QueryActivoFijoDto } from './dto/query-activo-fijo.dto';
 
+import { AuditoriaService } from '../auditoria/auditoria.service';
+import type { AuthenticatedUser } from '../auth/strategies/jwt.strategy';
+
 @Injectable()
 export class ActivosFijosService {
   private readonly logger = new Logger(ActivosFijosService.name);
@@ -23,6 +26,7 @@ export class ActivosFijosService {
     private readonly historialRepo: Repository<HistorialActivo>,
     @InjectRepository(Sucursal)
     private readonly sucursalRepo: Repository<Sucursal>,
+    private readonly auditoriaService: AuditoriaService,
   ) {}
 
   /**
@@ -193,7 +197,7 @@ export class ActivosFijosService {
       const historial = this.historialRepo.create({
         activo: guardado,
         sucursalDestino: item.sucursal,
-        tipoMovimiento: 'ALTA_INICIAL',
+        tipoMovimiento: 'ALTA',
         valorLibros: item.valorAdquisicion,
         observacion: 'Alta inicial patrimonial en sucursal operativa',
         fechaMovimiento: item.fechaAdquisicion,
@@ -284,7 +288,7 @@ export class ActivosFijosService {
   /**
    * Obtiene la ficha técnica completa de un activo con su historial de movimientos/traslados.
    */
-  async obtenerPorId(activoId: number) {
+  async obtenerPorId(activoId: number, usuarioSucursalId?: number) {
     const activo = await this.activoRepo.findOne({
       where: { activoId },
       relations: {
@@ -299,6 +303,10 @@ export class ActivosFijosService {
 
     if (!activo) {
       throw new NotFoundException(`Activo fijo #${activoId} no encontrado`);
+    }
+
+    if (usuarioSucursalId && activo.sucursal?.sucursalId !== usuarioSucursalId) {
+      throw new NotFoundException(`Activo fijo #${activoId} no pertenece a su sucursal asignada`);
     }
 
     const dep = this.calcularDepreciacion(
@@ -349,7 +357,7 @@ export class ActivosFijosService {
   /**
    * Da de alta un nuevo activo fijo incorporándolo al balance contable y al inventario de la sucursal.
    */
-  async crear(dto: CreateActivoFijoDto) {
+  async crear(dto: CreateActivoFijoDto, user?: AuthenticatedUser) {
     const existeCodigo = await this.activoRepo.findOne({
       where: { codigoActivo: dto.codigoActivo.trim().toUpperCase() },
     });
@@ -388,49 +396,76 @@ export class ActivosFijosService {
       fechaAdq,
     );
 
-    const nuevoActivo = this.activoRepo.create({
-      codigoActivo: dto.codigoActivo.trim().toUpperCase(),
-      descripcion: dto.descripcion.trim(),
-      categoriaActivo: categoria,
-      sucursal,
-      marca: dto.marca?.trim() || null,
-      modelo: dto.modelo?.trim() || null,
-      numeroSerie: dto.numeroSerie?.trim() || null,
-      fechaAdquisicion: fechaAdq,
-      valorAdquisicion: dto.valorAdquisicion,
-      valorResidual: dto.valorResidual || 0,
-      depreciacionAcumulada: dep.depreciacionAcumulada,
-      valorLibros: dep.valorLibros,
-      estado: 'ACTIVO',
-    });
+    const guardado = await this.activoRepo.manager.transaction(async (manager) => {
+      const nuevoActivo = manager.create(ActivoFijo, {
+        codigoActivo: dto.codigoActivo.trim().toUpperCase(),
+        descripcion: dto.descripcion.trim(),
+        categoriaActivo: categoria,
+        sucursal,
+        marca: dto.marca?.trim() || null,
+        modelo: dto.modelo?.trim() || null,
+        numeroSerie: dto.numeroSerie?.trim() || null,
+        fechaAdquisicion: fechaAdq,
+        valorAdquisicion: dto.valorAdquisicion,
+        valorResidual: dto.valorResidual || 0,
+        depreciacionAcumulada: dep.depreciacionAcumulada,
+        valorLibros: dep.valorLibros,
+        estado: 'ACTIVO',
+      });
 
-    const guardado = await this.activoRepo.save(nuevoActivo);
+      const activoGuardado = await manager.save(ActivoFijo, nuevoActivo);
 
-    // Registro inicial en bitácora de historial
-    const historial = this.historialRepo.create({
-      activo: guardado,
-      sucursalDestino: sucursal,
-      tipoMovimiento: 'ALTA_INICIAL',
-      valorLibros: dep.valorLibros,
-      observacion: 'Alta e incorporación patrimonial a sucursal operativa',
-      fechaMovimiento: new Date(),
+      // Registro inicial en bitácora de historial (tipo 'ALTA')
+      const historial = manager.create(HistorialActivo, {
+        activo: activoGuardado,
+        sucursalDestino: sucursal,
+        tipoMovimiento: 'ALTA',
+        valorLibros: dep.valorLibros,
+        observacion: 'Alta e incorporación patrimonial a sucursal operativa',
+        fechaMovimiento: new Date(),
+      });
+      await manager.save(HistorialActivo, historial);
+
+      return activoGuardado;
     });
-    await this.historialRepo.save(historial);
 
     this.logger.log(`Activo fijo creado: ${guardado.codigoActivo} - ${guardado.descripcion}`);
-    return this.obtenerPorId(guardado.activoId);
+    const result = await this.obtenerPorId(guardado.activoId);
+
+    try {
+      await this.auditoriaService.registrarEvento({
+        modulo: 'ACTIVOS_FIJOS',
+        operacion: 'INSERT',
+        tablaAfectada: 'ACTIVO_FIJO',
+        registroId: guardado.activoId,
+        descripcion: `Alta patrimonial de activo fijo ${guardado.codigoActivo}: "${guardado.descripcion}" en ${sucursal.nombre} (Valor: Q${guardado.valorAdquisicion}).`,
+        clientIdentifier: user?.username || 'sistema',
+        usuarioBd: user?.username || 'FARMACIA_APP',
+      });
+    } catch (e) {}
+
+    return result;
   }
 
   /**
    * Traslada un activo fijo de una sucursal a otra con trazabilidad patrimonial.
    */
-  async trasladar(activoId: number, dto: TrasladarActivoDto) {
+  async trasladar(
+    activoId: number,
+    dto: TrasladarActivoDto,
+    usuarioSucursalId?: number,
+    user?: AuthenticatedUser,
+  ) {
     const activo = await this.activoRepo.findOne({
       where: { activoId },
       relations: { sucursal: true, categoriaActivo: true },
     });
     if (!activo) {
       throw new NotFoundException(`Activo fijo #${activoId} no encontrado`);
+    }
+
+    if (usuarioSucursalId && activo.sucursal?.sucursalId !== usuarioSucursalId) {
+      throw new BadRequestException('Solo puede solicitar traslados de activos ubicados en su sucursal asignada');
     }
 
     if (activo.estado === 'DE_BAJA') {
@@ -449,6 +484,7 @@ export class ActivosFijosService {
     }
 
     const sucursalOrigen = activo.sucursal;
+    activo.sucursal = sucursalDestino;
 
     const dep = this.calcularDepreciacion(
       Number(activo.valorAdquisicion),
@@ -456,42 +492,63 @@ export class ActivosFijosService {
       activo.categoriaActivo?.vidaUtilMeses || 60,
       activo.fechaAdquisicion,
     );
+    activo.depreciacionAcumulada = dep.depreciacionAcumulada;
+    activo.valorLibros = dep.valorLibros;
+    await this.activoRepo.save(activo);
 
-    // Registrar en Historial
     const historial = this.historialRepo.create({
       activo,
       sucursalOrigen,
       sucursalDestino,
       tipoMovimiento: 'TRASLADO',
       valorLibros: dep.valorLibros,
-      observacion: dto.observacion?.trim() || `Traslado operativo de ${sucursalOrigen?.nombre} a ${sucursalDestino.nombre}`,
+      observacion:
+        dto.observacion?.trim() ||
+        `Traslado inter-sucursal: ${sucursalOrigen?.nombre || 'Sede'} -> ${sucursalDestino.nombre}`,
       fechaMovimiento: new Date(),
     });
     await this.historialRepo.save(historial);
 
-    // Actualizar sucursal en activo
-    activo.sucursal = sucursalDestino;
-    activo.depreciacionAcumulada = dep.depreciacionAcumulada;
-    activo.valorLibros = dep.valorLibros;
-    await this.activoRepo.save(activo);
-
     this.logger.log(
-      `Activo ${activo.codigoActivo} trasladado exitosamente a sucursal ${sucursalDestino.nombre}`,
+      `Activo ${activo.codigoActivo} trasladado exitosamente a ${sucursalDestino.nombre}`,
     );
 
-    return this.obtenerPorId(activo.activoId);
+    const result = await this.obtenerPorId(activo.activoId);
+
+    try {
+      await this.auditoriaService.registrarEvento({
+        modulo: 'ACTIVOS_FIJOS',
+        operacion: 'TRANSFERENCIA',
+        tablaAfectada: 'ACTIVO_FIJO',
+        registroId: activo.activoId,
+        descripcion: `Traslado de activo fijo ${activo.codigoActivo} (${activo.descripcion}) de ${sucursalOrigen?.nombre || 'Sede'} a ${sucursalDestino.nombre}. ${dto.observacion ? 'Observación: ' + dto.observacion : ''}`.trim(),
+        clientIdentifier: user?.username || 'sistema',
+        usuarioBd: user?.username || 'FARMACIA_APP',
+      });
+    } catch (e) {}
+
+    return result;
   }
 
   /**
    * Actualiza el estado operativo (Mantenimiento, Activo, Baja).
    */
-  async registrarMantenimiento(activoId: number, dto: MantenimientoActivoDto) {
+  async registrarMantenimiento(
+    activoId: number,
+    dto: MantenimientoActivoDto,
+    usuarioSucursalId?: number,
+    user?: AuthenticatedUser,
+  ) {
     const activo = await this.activoRepo.findOne({
       where: { activoId },
       relations: { sucursal: true, categoriaActivo: true },
     });
     if (!activo) {
       throw new NotFoundException(`Activo fijo #${activoId} no encontrado`);
+    }
+
+    if (usuarioSucursalId && activo.sucursal?.sucursalId !== usuarioSucursalId) {
+      throw new BadRequestException('Solo puede registrar mantenimiento en activos de su sucursal asignada');
     }
 
     const estadoAnterior = activo.estado;
@@ -507,7 +564,7 @@ export class ActivosFijosService {
     activo.valorLibros = dep.valorLibros;
     await this.activoRepo.save(activo);
 
-    const tipoMov = dto.estado === 'DE_BAJA' ? 'BAJA' : 'MANTENIMIENTO';
+    const tipoMov = dto.estado === 'DE_BAJA' ? 'BAJA' : 'CAMBIO_ESTADO';
     const obs =
       dto.observacion?.trim() ||
       `Cambio de estado: ${estadoAnterior} -> ${dto.estado} (${tipoMov})`;
@@ -523,16 +580,37 @@ export class ActivosFijosService {
     await this.historialRepo.save(historial);
 
     this.logger.log(`Activo ${activo.codigoActivo} actualizado a estado: ${dto.estado}`);
-    return this.obtenerPorId(activo.activoId);
+
+    const result = await this.obtenerPorId(activo.activoId);
+
+    try {
+      await this.auditoriaService.registrarEvento({
+        modulo: 'ACTIVOS_FIJOS',
+        operacion: dto.estado === 'DE_BAJA' ? 'DELETE' : 'UPDATE',
+        tablaAfectada: 'ACTIVO_FIJO',
+        registroId: activo.activoId,
+        descripcion: `Actualización de estado en activo fijo ${activo.codigoActivo} (${activo.descripcion}): ${estadoAnterior} -> ${dto.estado}. ${dto.observacion ? 'Detalle: ' + dto.observacion : ''}`.trim(),
+        clientIdentifier: user?.username || 'sistema',
+        usuarioBd: user?.username || 'FARMACIA_APP',
+      });
+    } catch (e) {}
+
+    return result;
   }
 
   /**
    * Resumen analítico y financiero de activos para gobierno corporativo y auditoría bursátil.
    */
-  async obtenerEstadisticas() {
+  async obtenerEstadisticas(sucursalId?: number) {
     await this.autoSeedActivosSiEstaVacio();
 
+    const where: any = {};
+    if (sucursalId) {
+      where.sucursal = { sucursalId };
+    }
+
     const activos = await this.activoRepo.find({
+      where,
       relations: { categoriaActivo: true, sucursal: true },
     });
 

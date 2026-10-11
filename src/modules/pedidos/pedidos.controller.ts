@@ -17,14 +17,24 @@ import { CambiarEstadoPedidoDto } from './dto/cambiar-estado-pedido.dto';
 import { QueryPedidosDto } from './dto/query-pedidos.dto';
 import { ConsultarDisponibilidadDto } from './dto/consultar-disponibilidad.dto';
 
+import { CurrentUser } from '../auth/decorators/current-user.decorator';
+import type { AuthenticatedUser } from '../auth/strategies/jwt.strategy';
+
 @Controller('pedidos')
 @UseGuards(JwtAuthGuard)
 export class PedidosController {
   constructor(private readonly pedidosService: PedidosService) {}
 
   @Get('estadisticas')
-  obtenerEstadisticas() {
-    return this.pedidosService.obtenerEstadisticasCallCenter();
+  obtenerEstadisticas(
+    @CurrentUser() user: AuthenticatedUser,
+    @Query('sucursalId') sucursalId?: string,
+  ) {
+    const esAdmin = user?.rolNombre?.toUpperCase() === 'ADMIN';
+    const effectiveSucursalId = esAdmin
+      ? (sucursalId ? Number(sucursalId) : undefined)
+      : (user?.sucursalId ?? undefined);
+    return this.pedidosService.obtenerEstadisticasCallCenter(effectiveSucursalId);
   }
 
   @Get('clientes/buscar')
@@ -37,8 +47,20 @@ export class PedidosController {
     return this.pedidosService.consultarDisponibilidad(dto);
   }
 
+  @Get('medicamentos-disponibles')
+  obtenerMedicamentosDisponibles() {
+    return this.pedidosService.obtenerMedicamentosDisponiblesCallCenter();
+  }
+
   @Get()
-  listar(@Query() query: QueryPedidosDto) {
+  listar(
+    @CurrentUser() user: AuthenticatedUser,
+    @Query() query: QueryPedidosDto,
+  ) {
+    const esAdmin = user?.rolNombre?.toUpperCase() === 'ADMIN';
+    if (!esAdmin && user?.sucursalId) {
+      query.sucursalId = user.sucursalId;
+    }
     return this.pedidosService.listarPedidos(query);
   }
 
@@ -56,7 +78,8 @@ export class PedidosController {
   actualizarEstado(
     @Param('id', ParseIntPipe) id: number,
     @Body() dto: CambiarEstadoPedidoDto,
+    @Request() req: any,
   ) {
-    return this.pedidosService.actualizarEstadoPedido(id, dto);
+    return this.pedidosService.actualizarEstadoPedido(id, dto, req?.user);
   }
 }

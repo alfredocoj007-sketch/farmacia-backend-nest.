@@ -16,6 +16,7 @@ import { PlanillasModule } from './modules/planillas/planillas.module';
 import { AuditoriaModule } from './modules/auditoria/auditoria.module';
 import { VentasModule } from './modules/ventas/ventas.module';
 import { UsuariosModule } from './modules/usuarios/usuarios.module';
+import { ReportesModule } from './modules/reportes/reportes.module';
 import { RequestIdMiddleware } from './common/middleware/request-id.middleware';
 import { HttpLoggerMiddleware } from './common/middleware/http-logger.middleware';
 
@@ -41,6 +42,7 @@ import { HttpLoggerMiddleware } from './common/middleware/http-logger.middleware
     AuditoriaModule,
     VentasModule,
     UsuariosModule,
+    ReportesModule,
   ],
 })
 export class AppModule implements NestModule {

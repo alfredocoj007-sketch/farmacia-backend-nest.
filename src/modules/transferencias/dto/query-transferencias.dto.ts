@@ -27,4 +27,9 @@ export class QueryTransferenciasDto {
   @Type(() => Number)
   @IsInt()
   sucursalDestinoId?: number;
+
+  @IsOptional()
+  @Type(() => Number)
+  @IsInt()
+  sucursalId?: number;
 }

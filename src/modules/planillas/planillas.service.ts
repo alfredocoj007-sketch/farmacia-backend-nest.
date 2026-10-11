@@ -27,6 +27,7 @@ const TASA_IGSS_LABORAL = 0.0483;
 const BONIFICACION_LEY_DTO_37_2001 = 250.0;
 
 import { BoletasPdfService } from './boletas-pdf.service';
+import { AuditoriaService } from '../auditoria/auditoria.service';
 
 @Injectable()
 export class PlanillasService {
@@ -52,6 +53,7 @@ export class PlanillasService {
     private readonly sucursalRepo: Repository<Sucursal>,
 
     private readonly boletasPdfService: BoletasPdfService,
+    private readonly auditoriaService: AuditoriaService,
   ) {}
 
   /**
@@ -310,7 +312,21 @@ export class PlanillasService {
     );
 
     this.logger.log(`Empleado creado #${guardado.empleadoId}: ${guardado.nombre} ${guardado.apellido}`);
-    return this.obtenerEmpleadoPorId(guardado.empleadoId);
+    const resEmp = await this.obtenerEmpleadoPorId(guardado.empleadoId);
+
+    try {
+      await this.auditoriaService.registrarEvento({
+        modulo: 'PLANILLAS',
+        operacion: 'INSERT',
+        tablaAfectada: 'EMPLEADO',
+        registroId: guardado.empleadoId,
+        descripcion: `Alta de nuevo colaborador: "${guardado.nombre} ${guardado.apellido}" (DPI: ${guardado.dpi}, Puesto: ${guardado.puesto?.nombre || 'General'}, Salario: Q${guardado.salarioActual}).`,
+        clientIdentifier: 'admin',
+        usuarioBd: 'FARMACIA_APP',
+      });
+    } catch (e) {}
+
+    return resEmp;
   }
 
   async actualizarEmpleado(id: number, dto: UpdateEmpleadoDto) {
@@ -353,7 +369,21 @@ export class PlanillasService {
     }
 
     await this.empleadoRepo.save(emp);
-    return this.obtenerEmpleadoPorId(id);
+    const resEmpAct = await this.obtenerEmpleadoPorId(id);
+
+    try {
+      await this.auditoriaService.registrarEvento({
+        modulo: 'PLANILLAS',
+        operacion: 'UPDATE',
+        tablaAfectada: 'EMPLEADO',
+        registroId: id,
+        descripcion: `Actualización de datos laborales del colaborador #${id} (${emp.nombre} ${emp.apellido}, Estado: ${emp.estado}).`,
+        clientIdentifier: 'admin',
+        usuarioBd: 'FARMACIA_APP',
+      });
+    } catch (e) {}
+
+    return resEmpAct;
   }
 
   async ajustarSalario(id: number, dto: AjustarSalarioDto) {
@@ -385,7 +415,21 @@ export class PlanillasService {
     await this.empleadoRepo.save(emp);
 
     this.logger.log(`Ajuste salarial aplicado a empleado #${id}: Q ${salarioAnterior} -> Q ${salarioNuevo}`);
-    return this.obtenerEmpleadoPorId(id);
+    const resAjuste = await this.obtenerEmpleadoPorId(id);
+
+    try {
+      await this.auditoriaService.registrarEvento({
+        modulo: 'PLANILLAS',
+        operacion: 'AJUSTE_SALARIO',
+        tablaAfectada: 'HISTORIAL_SALARIO',
+        registroId: id,
+        descripcion: `Ajuste salarial a colaborador #${id} (${emp.nombre} ${emp.apellido}): Q${salarioAnterior} -> Q${salarioNuevo}. Motivo: ${dto.motivo.trim()}.`,
+        clientIdentifier: 'admin',
+        usuarioBd: 'FARMACIA_APP',
+      });
+    } catch (e) {}
+
+    return resAjuste;
   }
 
   // ==========================================
@@ -546,7 +590,21 @@ export class PlanillasService {
     await this.planillaRepo.save(planillaGuardada);
 
     this.logger.log(`Planilla #${planillaGuardada.planillaId} generada exitosamente con ${empleados.length} colaboradores (${esQuincenal ? 'Quincenal' : 'Mensual'}).`);
-    return this.obtenerPlanillaPorId(planillaGuardada.planillaId);
+    const resPlanilla = await this.obtenerPlanillaPorId(planillaGuardada.planillaId);
+
+    try {
+      await this.auditoriaService.registrarEvento({
+        modulo: 'PLANILLAS',
+        operacion: 'INSERT',
+        tablaAfectada: 'PLANILLA',
+        registroId: planillaGuardada.planillaId,
+        descripcion: `Generación de nómina de sueldos #${planillaGuardada.planillaId} (${esQuincenal ? 'Quincenal' : 'Mensual'} del ${dto.fechaInicio} al ${dto.fechaFin}): ${empleados.length} colaboradores, Total Neto: Q${planillaGuardada.totalNeto}.`,
+        clientIdentifier: 'admin',
+        usuarioBd: 'FARMACIA_APP',
+      });
+    } catch (e) {}
+
+    return resPlanilla;
   }
 
   async actualizarDetallePlanilla(
@@ -621,7 +679,21 @@ export class PlanillasService {
     await this.planillaRepo.save(planilla);
 
     this.logger.log(`Planilla #${id} marcada como PAGADA con fondos de: ${planilla.cuentaOrigen} (${planilla.metodoPago}).`);
-    return this.obtenerPlanillaPorId(id);
+    const resPagada = await this.obtenerPlanillaPorId(id);
+
+    try {
+      await this.auditoriaService.registrarEvento({
+        modulo: 'PLANILLAS',
+        operacion: 'UPDATE',
+        tablaAfectada: 'PLANILLA',
+        registroId: id,
+        descripcion: `Cierre y pago definitivo de nómina de sueldos #${id}. Monto pagado: Q${planilla.totalNeto}. Cuenta: ${planilla.cuentaOrigen}.`,
+        clientIdentifier: 'admin',
+        usuarioBd: 'FARMACIA_APP',
+      });
+    } catch (e) {}
+
+    return resPagada;
   }
 
   async cancelarPlanilla(id: number) {
@@ -637,6 +709,19 @@ export class PlanillasService {
 
     planilla.estado = 'CANCELADA';
     await this.planillaRepo.save(planilla);
+
+    try {
+      await this.auditoriaService.registrarEvento({
+        modulo: 'PLANILLAS',
+        operacion: 'DELETE',
+        tablaAfectada: 'PLANILLA',
+        registroId: id,
+        descripcion: `Cancelación de nómina de sueldos #${id}.`,
+        clientIdentifier: 'admin',
+        usuarioBd: 'FARMACIA_APP',
+      });
+    } catch (e) {}
+
     return this.obtenerPlanillaPorId(id);
   }
 

@@ -9,6 +9,9 @@ import { CreateProductoDto } from './dto/create-producto.dto';
 import { UpdateProductoDto } from './dto/update-producto.dto';
 import { QueryProductosDto } from './dto/query-productos.dto';
 
+import { AuditoriaService } from '../auditoria/auditoria.service';
+import type { AuthenticatedUser } from '../auth/strategies/jwt.strategy';
+
 @Injectable()
 export class ProductosService {
   constructor(
@@ -23,9 +26,11 @@ export class ProductosService {
 
     @InjectRepository(UnidadMedida)
     private readonly unidadMedidaRepo: Repository<UnidadMedida>,
+
+    private readonly auditoriaService: AuditoriaService,
   ) {}
 
-  async create(dto: CreateProductoDto): Promise<Producto> {
+  async create(dto: CreateProductoDto, user?: AuthenticatedUser): Promise<Producto> {
     await this.assertCodigoDisponible(dto.codigoProducto);
 
     const producto = this.productoRepo.create({
@@ -42,7 +47,21 @@ export class ProductosService {
       unidadMedida: await this.resolveUnidadMedida(dto.unidadMedidaId),
     });
 
-    return this.productoRepo.save(producto);
+    const guardado = await this.productoRepo.save(producto);
+
+    try {
+      await this.auditoriaService.registrarEvento({
+        modulo: 'INVENTARIO',
+        operacion: 'INSERT',
+        tablaAfectada: 'PRODUCTO',
+        registroId: guardado.productoId,
+        descripcion: `Alta de nuevo medicamento/producto: "${guardado.nombre}" (Código: ${guardado.codigoProducto}, Precio: Q${guardado.precioVenta}).`,
+        clientIdentifier: user?.username || 'sistema',
+        usuarioBd: user?.username || 'FARMACIA_APP',
+      });
+    } catch (e) {}
+
+    return guardado;
   }
 
   async findAll(query: QueryProductosDto) {
@@ -60,7 +79,7 @@ export class ProductosService {
 
     if (query.q) {
       qb.andWhere(
-        '(LOWER(producto.nombre) LIKE :q OR LOWER(producto.codigoProducto) LIKE :q)',
+        '(LOWER(producto.nombre) LIKE :q OR LOWER(producto.codigoProducto) LIKE :q OR LOWER(producto.principioActivo) LIKE :q OR LOWER(producto.presentacion) LIKE :q OR LOWER(producto.concentracion) LIKE :q)',
         { q: `%${query.q.toLowerCase()}%` },
       );
     }
@@ -91,7 +110,11 @@ export class ProductosService {
     return producto;
   }
 
-  async update(productoId: number, dto: UpdateProductoDto): Promise<Producto> {
+  async update(
+    productoId: number,
+    dto: UpdateProductoDto,
+    user?: AuthenticatedUser,
+  ): Promise<Producto> {
     const producto = await this.findOne(productoId);
 
     if (dto.codigoProducto && dto.codigoProducto !== producto.codigoProducto) {
@@ -117,19 +140,61 @@ export class ProductosService {
       producto.unidadMedida = await this.resolveUnidadMedida(dto.unidadMedidaId);
     }
 
-    return this.productoRepo.save(producto);
+    const guardado = await this.productoRepo.save(producto);
+
+    try {
+      await this.auditoriaService.registrarEvento({
+        modulo: 'INVENTARIO',
+        operacion: 'UPDATE',
+        tablaAfectada: 'PRODUCTO',
+        registroId: guardado.productoId,
+        descripcion: `Actualización de producto: "${guardado.nombre}" (${guardado.codigoProducto}, Precio: Q${guardado.precioVenta}).`,
+        clientIdentifier: user?.username || 'sistema',
+        usuarioBd: user?.username || 'FARMACIA_APP',
+      });
+    } catch (e) {}
+
+    return guardado;
   }
 
-  async desactivar(productoId: number): Promise<Producto> {
+  async desactivar(productoId: number, user?: AuthenticatedUser): Promise<Producto> {
     const producto = await this.findOne(productoId);
     producto.estado = 'INACTIVO';
-    return this.productoRepo.save(producto);
+    const guardado = await this.productoRepo.save(producto);
+
+    try {
+      await this.auditoriaService.registrarEvento({
+        modulo: 'INVENTARIO',
+        operacion: 'UPDATE',
+        tablaAfectada: 'PRODUCTO',
+        registroId: guardado.productoId,
+        descripcion: `Desactivación de producto: "${guardado.nombre}" (${guardado.codigoProducto}). Estado: INACTIVO.`,
+        clientIdentifier: user?.username || 'sistema',
+        usuarioBd: user?.username || 'FARMACIA_APP',
+      });
+    } catch (e) {}
+
+    return guardado;
   }
 
-  async activar(productoId: number): Promise<Producto> {
+  async activar(productoId: number, user?: AuthenticatedUser): Promise<Producto> {
     const producto = await this.findOne(productoId);
     producto.estado = 'ACTIVO';
-    return this.productoRepo.save(producto);
+    const guardado = await this.productoRepo.save(producto);
+
+    try {
+      await this.auditoriaService.registrarEvento({
+        modulo: 'INVENTARIO',
+        operacion: 'UPDATE',
+        tablaAfectada: 'PRODUCTO',
+        registroId: guardado.productoId,
+        descripcion: `Reactivación de producto: "${guardado.nombre}" (${guardado.codigoProducto}). Estado: ACTIVO.`,
+        clientIdentifier: user?.username || 'sistema',
+        usuarioBd: user?.username || 'FARMACIA_APP',
+      });
+    } catch (e) {}
+
+    return guardado;
   }
 
   private async assertCodigoDisponible(codigoProducto: string): Promise<void> {
