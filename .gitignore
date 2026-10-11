@@ -64,3 +64,19 @@ src/database/seed-test.ts
 src/database/reset-db.ts
 src/database/reset-admin.ts
 *.sql
+
+# TypeScript build cache
+*.tsbuildinfo
+
+# Certificates, keys & sensitive credentials
+*.pem
+*.key
+*.cert
+*.pfx
+*.p12
+
+# Editor & OS temporary files
+._*
+*.swp
+*~
+*.bak
