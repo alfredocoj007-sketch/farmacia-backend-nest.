@@ -54,3 +54,12 @@ pids
 
 # Diagnostic reports (https://nodejs.org/api/report.html)
 report.[0-9]*.[0-9]*.[0-9]*.[0-9]*.json
+
+# Database seeds & scripts SQL
+src/database/*seed*
+src/database/*.sql
+src/database/seed_oficial_farmacia.sql
+src/database/seed-oficial.ts
+src/database/seed-test.ts
+src/database/reset-db.ts
+*.sql
